@@ -1026,6 +1026,8 @@ function ReturnRegistration({ userRole, isMobile = false }) {
       setShowEditModal(false);
       setEditSelectedFiles([]);
       setEditFilePreviews([]);
+      // 重新拉取该单的修改记录，否则展开区看到的还是改动前的旧数据
+      if (editingRecord?.ID) fetchChangeHistory(editingRecord.ID);
       setPage(1);
       fetchRecords(1);
     } catch (error) {
