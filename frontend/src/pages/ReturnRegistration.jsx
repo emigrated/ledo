@@ -1273,45 +1273,6 @@ function ReturnRegistration({ userRole, isMobile = false }) {
       </div>
 
       <div style={{ background: '#fff', padding: isMobile ? '10px' : '12px', borderRadius: '8px', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-        {isAdmin && pendingBatch.length > 0 && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', background: '#fff5f5', border: '1px solid #f44336', borderRadius: '6px', flexWrap: 'wrap', flex: isMobile ? '1 1 100%' : '0 0 auto' }}>
-            <span style={{ fontSize: '12px', color: '#c62828', fontWeight: '500', whiteSpace: 'nowrap' }}>待分发</span>
-            <label
-              title={batchProofFile ? '点击重新选择凭证' : '上传结算凭证（多笔共用一张）'}
-              style={{ width: '28px', height: '28px', border: batchProofPreview ? '1px solid #f44336' : '1px dashed #f44336', borderRadius: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', fontSize: '16px', color: '#f44336', background: '#fff', overflow: 'hidden', flexShrink: 0 }}
-            >
-              {batchProofPreview ? <img src={batchProofPreview} alt="凭证" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : '+'}
-              <input type="file" accept="image/jpeg,image/jpg,image/png,image/gif" onChange={e => handleBatchProofChange(e.target.files[0])} style={{ display: 'none' }} />
-            </label>
-            <input
-              type="text"
-              placeholder="📋右键粘贴"
-              onPaste={(e) => { handleContainerPaste(e, (f) => handleBatchProofChange(f)); }}
-              style={{ width: '76px', height: '28px', fontSize: '11px', border: '1px dashed #1976d2', borderRadius: '4px', padding: '0 4px', outline: 'none', cursor: 'default', background: '#f0f7ff', color: '#1976d2', boxSizing: 'border-box' }}
-            />
-            <span onClick={() => setShowBatchDetail(v => !v)} style={{ fontSize: '12px', color: '#c62828', cursor: 'pointer', whiteSpace: 'nowrap', textDecoration: 'underline' }}>
-              {pendingBatch.length} 笔 ¥{pendingBatchTotal.toFixed(2)}
-            </span>
-            <button
-              onClick={handleConfirmBatchDistribute}
-              disabled={batchSubmitting}
-              style={{ padding: '4px 12px', background: batchSubmitting ? '#bdbdbd' : '#4caf50', color: '#fff', border: 'none', borderRadius: '4px', cursor: batchSubmitting ? 'default' : 'pointer', fontSize: '12px', whiteSpace: 'nowrap' }}
-            >
-              {batchSubmitting ? '分发中…' : '确认'}
-            </button>
-            <button onClick={clearPendingBatch} style={{ padding: '4px 8px', background: '#9e9e9e', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>清空</button>
-            {showBatchDetail && (
-              <div style={{ flexBasis: '100%', display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '2px' }}>
-                {pendingBatch.map(p => (
-                  <span key={p.id} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '2px 6px', background: '#fff', border: '1px solid #ffcdd2', borderRadius: '3px', fontSize: '11px', color: '#c62828' }}>
-                    {p.orderNo || ('#' + p.id)} ¥{Number(p.amount).toFixed(2)}
-                    <span title="移除" onClick={() => removePendingBatchItem(p.id)} style={{ cursor: 'pointer', color: '#f44336', fontWeight: 'bold' }}>×</span>
-                  </span>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
         {!isMobile && (
         <span style={{ fontSize: '13px', fontWeight: '500', width: isMobile ? '100%' : 'auto', marginBottom: isMobile ? '4px' : 0 }}>搜索：</span>
         )}
@@ -1349,6 +1310,45 @@ function ReturnRegistration({ userRole, isMobile = false }) {
             清空
           </button>
         </div>
+        {isAdmin && pendingBatch.length > 0 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', background: '#fff5f5', border: '1px solid #f44336', borderRadius: '6px', flexWrap: 'wrap', flex: isMobile ? '1 1 100%' : '0 0 auto', marginLeft: isMobile ? 0 : 'auto' }}>
+            <span style={{ fontSize: '12px', color: '#c62828', fontWeight: '500', whiteSpace: 'nowrap' }}>待分发</span>
+            <label
+              title={batchProofFile ? '点击重新选择凭证' : '上传结算凭证（多笔共用一张）'}
+              style={{ width: '28px', height: '28px', border: batchProofPreview ? '1px solid #f44336' : '1px dashed #f44336', borderRadius: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', fontSize: '16px', color: '#f44336', background: '#fff', overflow: 'hidden', flexShrink: 0 }}
+            >
+              {batchProofPreview ? <img src={batchProofPreview} alt="凭证" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : '+'}
+              <input type="file" accept="image/jpeg,image/jpg,image/png,image/gif" onChange={e => handleBatchProofChange(e.target.files[0])} style={{ display: 'none' }} />
+            </label>
+            <input
+              type="text"
+              placeholder="📋右键粘贴"
+              onPaste={(e) => { handleContainerPaste(e, (f) => handleBatchProofChange(f)); }}
+              style={{ width: '76px', height: '28px', fontSize: '11px', border: '1px dashed #1976d2', borderRadius: '4px', padding: '0 4px', outline: 'none', cursor: 'default', background: '#f0f7ff', color: '#1976d2', boxSizing: 'border-box' }}
+            />
+            <span onClick={() => setShowBatchDetail(v => !v)} style={{ fontSize: '12px', color: '#c62828', cursor: 'pointer', whiteSpace: 'nowrap', textDecoration: 'underline' }}>
+              {pendingBatch.length} 笔 ¥{pendingBatchTotal.toFixed(2)}
+            </span>
+            <button
+              onClick={handleConfirmBatchDistribute}
+              disabled={batchSubmitting}
+              style={{ padding: '4px 12px', background: batchSubmitting ? '#bdbdbd' : '#4caf50', color: '#fff', border: 'none', borderRadius: '4px', cursor: batchSubmitting ? 'default' : 'pointer', fontSize: '12px', whiteSpace: 'nowrap' }}
+            >
+              {batchSubmitting ? '分发中…' : '确认'}
+            </button>
+            <button onClick={clearPendingBatch} style={{ padding: '4px 8px', background: '#9e9e9e', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>清空</button>
+            {showBatchDetail && (
+              <div style={{ flexBasis: '100%', display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '2px' }}>
+                {pendingBatch.map(p => (
+                  <span key={p.id} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '2px 6px', background: '#fff', border: '1px solid #ffcdd2', borderRadius: '3px', fontSize: '11px', color: '#c62828' }}>
+                    {p.orderNo || ('#' + p.id)} ¥{Number(p.amount).toFixed(2)}
+                    <span title="移除" onClick={() => removePendingBatchItem(p.id)} style={{ cursor: 'pointer', color: '#f44336', fontWeight: 'bold' }}>×</span>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div>
