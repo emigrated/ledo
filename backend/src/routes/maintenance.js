@@ -425,7 +425,8 @@ router.post('/:id/attachments', upload.single('file'), async (req, res) => {
   }
   
   const fileType = req.body.file_type || 'attachment';
-  const status = req.body.status || 'pending';
+  // 管理员上传的附件直接生效，不再挂「待审核」
+  const status = (req.user && req.user.role === 'admin') ? 'approved' : (req.body.status || 'pending');
   const uploadedBy = req.body.uploaded_by || 'unknown';
   
   const sql = `
@@ -678,6 +679,68 @@ router.post('/:id/change-request', async (req, res) => {
     await pool.query('SET NAMES utf8mb4');
     
     const userId = req.headers['x-user-id'] || req.body.requested_by || null;
+    
+    // ===== 管理员：直接生效，不入审核队列，但仍写一条已通过的修改记录 =====
+    const isAdmin = !!(req.user && req.user.role === 'admin');
+    if (isAdmin) {
+      const NON_EDITABLE = ['维修单号', '创建时间', 'id', 'created_at'];
+      const setClauses = [];
+      const values = [];
+      const changeDetails = [];
+      
+      for (const [key, value] of Object.entries(changedFields || {})) {
+        if (key === 'requested_by' || NON_EDITABLE.includes(key)) continue;
+        const dbField = fieldMap[key];
+        if (!dbField || NON_EDITABLE.includes(dbField)) continue;
+        
+        let fieldValue = value;
+        if (value && typeof value === 'object' && value.new !== undefined) {
+          fieldValue = value.new;
+          const oldStr = (value.old === undefined || value.old === null || value.old === '') ? '(空)' : value.old;
+          const newStr = (value.new === undefined || value.new === null || value.new === '') ? '(空)' : value.new;
+          changeDetails.push(`${key}: ${oldStr} → ${newStr}`);
+        } else {
+          changeDetails.push(`${key}: ${fieldValue === '' || fieldValue === null || fieldValue === undefined ? '(空)' : fieldValue}`);
+        }
+        
+        if (fieldValue === '') fieldValue = null;
+        setClauses.push('`' + dbField + '` = ?');
+        values.push(fieldValue);
+      }
+      
+      if (setClauses.length === 0) {
+        return res.status(400).json({ error: '没有实际改动' });
+      }
+      
+      values.push(maintenanceId);
+      await pool.query(`UPDATE maintenance SET ${setClauses.join(', ')} WHERE id = ?`, values);
+      
+      const [cr] = await pool.query(
+        `INSERT INTO maintenance_change_requests 
+         (maintenance_id, changed_fields, change_reason, requested_by, status, processed_by, processed_at)
+         VALUES (?, ?, ?, ?, 'approved', ?, NOW())`,
+        [maintenanceId, JSON.stringify(changedFields || {}), '管理员直接修改', userId, userId]
+      );
+      
+      try {
+        await pool.query(
+          'UPDATE maintenance_attachments SET status = ? WHERE maintenance_id = ? AND status = ?',
+          ['approved', maintenanceId, 'pending']
+        );
+      } catch (e) {
+        console.error('Failed to approve pending attachments:', e.message);
+      }
+      
+      const [rows] = await pool.query('SELECT * FROM maintenance_change_requests WHERE id = ?', [cr.insertId]);
+      console.log(`Admin ${userId} directly updated maintenance ${maintenanceId}: ${changeDetails.join('; ')}`);
+      
+      return res.status(200).json({
+        ...(rows[0] || {}),
+        message: '修改已生效',
+        directModified: true,
+        changes: changeDetails
+      });
+    }
     
     const [result] = await pool.query(sql, [
       maintenanceId,

@@ -138,7 +138,8 @@ router.post('/:id/attachments', upload.single('file'), async (req, res) => {
     logger.info('Content-Type:', req.headers['content-type']);
     
     const { id } = req.params;
-    const status = req.body.status || 'approved';
+    // 管理员上传的附件直接生效，不再挂「待审核」
+    const status = (req.user && req.user.role === 'admin') ? 'approved' : (req.body.status || 'approved');
     
     if (!req.file) {
       logger.error('No file uploaded');
@@ -501,7 +502,10 @@ router.post('/:id/change-request', async (req, res) => {
       [id, 'pending']
     );
     
-    if (existingChanges.length > 0) {
+    const isAdmin = !!(req.user && req.user.role === 'admin');
+    
+    // 管理员直接修改，不受「已有待审核申请」限制
+    if (!isAdmin && existingChanges.length > 0) {
       return res.status(400).json({ error: '已存在待审核的修改申请' });
     }
     
@@ -520,6 +524,69 @@ router.post('/:id/change-request', async (req, res) => {
       }
     }
     const originalDataStr = JSON.stringify(originalData);
+    
+    // ===== 管理员：直接生效，不入审核队列，但仍写一条已通过的修改记录 =====
+    if (isAdmin) {
+      const sets = [];
+      const values = [];
+      const changeDetails = [];
+      
+      for (const [key, raw] of Object.entries(changes)) {
+        if (!allowedFields.includes(key) || IMMUTABLE_FIELDS.includes(key)) continue;
+        const newValue = (raw === undefined || raw === null || raw === '') ? null : raw;
+        const oldRaw = currentRecord[key];
+        const oldStr = (oldRaw === undefined || oldRaw === null) ? '' : String(oldRaw).trim();
+        const newStr = newValue === null ? '' : String(newValue).trim();
+        if (oldStr === newStr) continue;
+        changeDetails.push(`${key}: ${oldStr || '空'} → ${newStr || '空'}`);
+        sets.push('`' + key + '` = ?');
+        values.push(newValue);
+      }
+      
+      if (sets.length === 0) {
+        return res.status(400).json({ error: '没有实际改动' });
+      }
+      
+      await pool.execute(
+        `UPDATE customer SET ${sets.join(', ')} WHERE ID = ?`,
+        [...values, id]
+      );
+      
+      const [updatedRows] = await pool.execute('SELECT * FROM customer WHERE ID = ?', [id]);
+      const updatedRecord = updatedRows[0] || {};
+      
+      const [result] = await pool.execute(
+        'INSERT INTO change_requests (registration_id, applicant_id, proposed_changes, original_data, status, reviewed_by, reviewed_at) VALUES (?, ?, ?, ?, ?, ?, NOW())',
+        [id, null, proposedChanges, originalDataStr, 'approved', req.user.userId]
+      );
+      
+      try {
+        await pool.execute(
+          'INSERT INTO customer_history (registration_id, field_name, old_value, new_value, changed_by, changed_at) VALUES (?, ?, ?, ?, ?, NOW())',
+          [id, 'multiple', JSON.stringify({ changes: changeDetails.join(', '), status: 'admin_direct' }), JSON.stringify(updatedRecord), req.user.userId]
+        );
+      } catch (e) {
+        logger.error('Failed to insert admin direct change history:', e);
+      }
+      
+      try {
+        await pool.execute(
+          'UPDATE attachments SET status = ? WHERE customer_id = ? AND status = ?',
+          ['approved', id, 'pending']
+        );
+      } catch (e) {
+        logger.error('Failed to approve pending attachments:', e);
+      }
+      
+      logger.info(`Admin ${req.user.userId} directly updated registration ${id}: ${changeDetails.join('; ')}`);
+      
+      return res.json({
+        message: '修改已生效',
+        directModified: true,
+        changeRequestId: result.insertId,
+        changes: changeDetails
+      });
+    }
     
     const [result] = await pool.execute(
       'INSERT INTO change_requests (registration_id, applicant_id, proposed_changes, original_data, status) VALUES (?, ?, ?, ?, ?)',

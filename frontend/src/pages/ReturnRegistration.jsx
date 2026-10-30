@@ -1002,15 +1002,27 @@ function ReturnRegistration({ userRole, isMobile = false }) {
         return;
       }
       
-      if (Object.keys(changedFields).length > 0 || editSelectedFiles.length > 0) {
-        await api.post(`/customer/${editingRecord.ID}/change-request`, changedFields);
+      let submitResult = null;
+      if (Object.keys(changedFields).length > 0) {
+        submitResult = await api.post(`/customer/${editingRecord.ID}/change-request`, changedFields);
+        if (submitResult && submitResult.ok === false) {
+          alert('提交失败：' + (submitResult.data?.error || '未知错误'));
+          return;
+        }
       }
       
       if (editSelectedFiles.length > 0) {
         await uploadEditAttachments(editingRecord.ID);
       }
       
-      alert('修改申请已提交，等待管理员审核');
+      if (submitResult && submitResult.data && submitResult.data.directModified) {
+        const list = Array.isArray(submitResult.data.changes) ? submitResult.data.changes : [];
+        alert('修改已生效' + (list.length ? '\n\n' + list.join('\n') : ''));
+      } else if (!submitResult && editSelectedFiles.length > 0 && isAdmin) {
+        alert('附件已更新');
+      } else {
+        alert('修改申请已提交，等待管理员审核');
+      }
       setShowEditModal(false);
       setEditSelectedFiles([]);
       setEditFilePreviews([]);
@@ -1927,8 +1939,9 @@ function ReturnRegistration({ userRole, isMobile = false }) {
                                   } catch (e) {
                                     changes = [];
                                   }
+                                  const isDirectAdminChange = cr.status === 'approved' && !cr.applicant_id && cr.reviewed_by;
                                   const statusColor = cr.status === 'approved' ? '#4caf50' : cr.status === 'rejected' ? '#f44336' : '#ff9800';
-                                  const statusText = cr.status === 'approved' ? '已通过' : cr.status === 'rejected' ? '已拒绝' : '待审核';
+                                  const statusText = cr.status === 'approved' ? (isDirectAdminChange ? '已通过（管理员直接修改）' : '已通过') : cr.status === 'rejected' ? '已拒绝' : '待审核';
                                   const createdAt = cr.created_at ? fmtTime(cr.created_at) : '未知时间';
                                   let originalData = {};
                                   try {
@@ -1946,7 +1959,7 @@ function ReturnRegistration({ userRole, isMobile = false }) {
                                   return (
                                     <div key={cr.id || Math.random()} style={{ padding: '8px', background: '#f9f9f9', borderRadius: '4px', fontSize: '12px', marginBottom: '8px' }}>
                                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                                        <span style={{ color: '#666' }}>申请人: {cr.applicant_name || '未知'} | {createdAt}</span>
+                                        <span style={{ color: '#666' }}>申请人: {cr.applicant_name || (cr.applicant_id ? '未知' : '管理员')} | {createdAt}</span>
                                         <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                                           <span style={{ color: statusColor, fontWeight: 'bold' }}>{statusText}</span>
                                           {(() => { const u = JSON.parse(localStorage.getItem('user') || '{}'); return u?.role === 'admin' ? (
@@ -2004,11 +2017,6 @@ function ReturnRegistration({ userRole, isMobile = false }) {
                                       <button
                                         onClick={(e) => {
                                           e.stopPropagation();
-                                          const hasPending = changeHistory[record.ID] && changeHistory[record.ID].some(cr => cr.status === 'pending');
-                                          if (hasPending) {
-                                            alert('您有待审核的修改申请，请等待审核完成后再提交新的修改');
-                                            return;
-                                          }
                                           handleEdit(record);
                                         }}
                                         style={{
@@ -2248,7 +2256,7 @@ function ReturnRegistration({ userRole, isMobile = false }) {
             <div style={{ display: 'flex', gap: '6px', marginTop: '8px', paddingTop: '8px', borderTop: '1px solid #eee' }}>
               {isAdmin ? (
                 <>
-                  <button onClick={(e) => { e.stopPropagation(); const hasPending = changeHistory[record.ID] && changeHistory[record.ID].some(cr => cr.status === 'pending'); if (hasPending) { alert('您有待审核的修改申请，请等待审核完成后再提交新的修改'); return; } handleEdit(record); }} style={{ flex: 1, padding: '6px', background: '#ff9800', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '11px' }}>修改</button>
+                  <button onClick={(e) => { e.stopPropagation(); handleEdit(record); }} style={{ flex: 1, padding: '6px', background: '#ff9800', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '11px' }}>修改</button>
                   <button onClick={(e) => { e.stopPropagation(); handleCopyRecord(record); }} style={{ flex: 1, padding: '6px', background: '#9c27b0', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '11px' }}>复制</button>
                   <button onClick={(e) => { e.stopPropagation(); handleShareRecord(record); }} style={{ flex: 1, padding: '6px', background: '#ff9800', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '11px' }}>分享</button>
                   <button onClick={(e) => { e.stopPropagation(); if (window.confirm('确定要删除该记录吗？')) { handleDelete(record.ID); } }} style={{ flex: 1, padding: '6px', background: '#f44336', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '11px' }}>删除</button>

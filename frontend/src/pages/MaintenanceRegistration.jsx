@@ -1518,7 +1518,7 @@ function MaintenanceRegistration({ isMobile = false }) {
         <div style={{ padding: isMobileView ? '8px 0 0' : '0', marginTop: isMobileView ? '0' : '8px' }}>
           <div style={isMobileView ? { display: 'flex', gap: '8px', flexWrap: 'wrap' } : { background: '#f9f9f9', padding: '8px', border: '1px solid #ddd', borderRadius: '4px', textAlign: 'center' }}>
             <div style={{ display: 'flex', gap: '8px', justifyContent: isMobileView ? 'flex-start' : 'center', flexWrap: 'wrap' }}>
-              <button onClick={(e) => { e.stopPropagation(); const hasPending = changeHistory[rec.维修单号] && changeHistory[rec.维修单号].some(cr => cr.status === 'pending'); if (hasPending) { alert('您有待审核的修改申请，请等待审核完成后再提交新的修改'); return; } handleEdit(rec); }}
+              <button onClick={(e) => { e.stopPropagation(); const hasPending = changeHistory[rec.维修单号] && changeHistory[rec.维修单号].some(cr => cr.status === 'pending'); if (hasPending && !isAdmin) { alert('您有待审核的修改申请，请等待审核完成后再提交新的修改'); return; } handleEdit(rec); }}
                 style={{ padding: '4px 12px', background: '#1976d2', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
                 {rec.状态 === '预登记' ? '完善登记' : '修改记录'}
               </button>
@@ -1770,8 +1770,17 @@ function MaintenanceRegistration({ isMobile = false }) {
             ...changedFields,
             requested_by: user?.id || localStorage.getItem('userId')
           };
-          await api.post(`/maintenance/${editingRecord.维修单号}/change-request`, payload);
-          alert('修改申请已提交，等待管理员审核');
+          const submitRes = await api.post(`/maintenance/${editingRecord.维修单号}/change-request`, payload);
+          if (submitRes && submitRes.ok === false) {
+            alert('提交失败：' + (submitRes.data?.error || '未知错误'));
+            return;
+          }
+          if (submitRes && submitRes.data && submitRes.data.directModified) {
+            const list = Array.isArray(submitRes.data.changes) ? submitRes.data.changes : [];
+            alert('修改已生效' + (list.length ? '\n\n' + list.join('\n') : ''));
+          } else {
+            alert('修改申请已提交，等待管理员审核');
+          }
         } else {
           alert('没有修改任何内容');
         }
@@ -2531,7 +2540,7 @@ function MaintenanceRegistration({ isMobile = false }) {
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     const hasPending = changeHistory[rec.维修单号] && changeHistory[rec.维修单号].some(cr => cr.status === 'pending');
-                                    if (hasPending) {
+                                    if (hasPending && !isAdmin) {
                                       alert('您有待审核的修改申请，请等待审核完成后再提交新的修改');
                                       return;
                                     }
