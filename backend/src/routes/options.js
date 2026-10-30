@@ -1,6 +1,7 @@
 const express = require('express');
 const { pool } = require('../config/database');
 const { logger } = require('../utils/logger');
+const { authenticate, authorize } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -72,6 +73,8 @@ router.get('/all',
 );
 
 router.post('/',
+  authenticate,
+  authorize('admin'),
   async (req, res) => {
     try {
       const { category, value } = req.body;
@@ -102,6 +105,8 @@ router.post('/',
 );
 
 router.delete('/:id',
+  authenticate,
+  authorize('admin'),
   async (req, res) => {
     try {
       const { id } = req.params;

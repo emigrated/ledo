@@ -1,6 +1,7 @@
 const express = require('express');
 const { pool } = require('../config/database');
 const { logger } = require('../utils/logger');
+const { authenticate, authorize } = require('../middleware/auth');
 const router = express.Router();
 const { validateProductPayload, checkDuplicate } = require('../utils/product_data_validator');
 
@@ -169,7 +170,7 @@ router.get('/price/:brand/:model/:type/:color/:spec', async (req, res) => {
   }
 });
 
-router.post('/', async (req, res) => {
+router.post('/', authenticate, authorize('admin'), async (req, res) => {
   try {
     const payload = req.body || {};
     let validated;
@@ -186,7 +187,7 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.put('/:id', async (req, res) => {
+router.put('/:id', authenticate, authorize('admin'), async (req, res) => {
   try {
     const { id } = req.params;
     const { brand, model, type, color, spec, price } = req.body;
@@ -199,7 +200,7 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', authenticate, authorize('admin'), async (req, res) => {
   try {
     const { id } = req.params;
     await pool.execute('DELETE FROM product_data WHERE id = ?', [id]);
