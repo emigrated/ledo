@@ -51,3 +51,5 @@ __pycache__/
 # ===== AI 工具缓存 =====
 .open-mem/
 opencode/
+*.bak.*
+*.bak2

@@ -64,6 +64,20 @@ function ReturnRegistration({ userRole, isMobile = false }) {
   const [settlementRecord, setSettlementRecord] = useState(null);
   const [settlementImage, setSettlementImage] = useState(null);
   const [settlementImagePreview, setSettlementImagePreview] = useState(null);
+  // 批量结算：已录入金额、等待分发凭证的记录（含订单号与金额，便于页面汇总核对）
+  const [pendingBatch, setPendingBatch] = useState(() => {
+    try {
+      const saved = localStorage.getItem('pendingSettlementBatch');
+      const arr = saved ? JSON.parse(saved) : [];
+      return Array.isArray(arr) ? arr : [];
+    } catch (e) {
+      return [];
+    }
+  });
+  const [batchProofFile, setBatchProofFile] = useState(null);
+  const [batchProofPreview, setBatchProofPreview] = useState(null);
+  const [batchSubmitting, setBatchSubmitting] = useState(false);
+  const [showBatchDetail, setShowBatchDetail] = useState(false);
   const [showShippingModal, setShowShippingModal] = useState(false);
   const [shippingAmount, setShippingAmount] = useState('');
   const [showProofModal, setShowProofModal] = useState(false);
@@ -1019,18 +1033,33 @@ function ReturnRegistration({ userRole, isMobile = false }) {
     setPreviewType('');
   };
 
+  // 结算徽标：红=已录金额待分发凭证，绿=金额与凭证齐全，橙=未结算
+  const hasSettleAmount = (r) => !!(r && r.结算金额 !== null && r.结算金额 !== undefined && r.结算金额 !== '' && Number(r.结算金额) > 0);
+  const hasSettleProof = (r) => !!(r && r.settlement_proof_url && String(r.settlement_proof_url).trim());
+  const settlementBadgeBg = (r) => {
+    if (hasSettleAmount(r)) return hasSettleProof(r) ? '#4caf50' : '#f44336';
+    return (r && r.结算 === '已结算') ? '#4caf50' : '#ff9800';
+  };
+
+  // 累计列表持久化，刷新页面不丢
+  useEffect(() => {
+    try {
+      localStorage.setItem('pendingSettlementBatch', JSON.stringify(pendingBatch));
+    } catch (e) { /* 忽略存储异常 */ }
+  }, [pendingBatch]);
+
+  const pendingBatchTotal = pendingBatch.reduce((s, p) => s + Number(p.amount || 0), 0);
+
   const handleSettlementClick = (record) => {
-    if (record.结算金额) {
+    if (hasSettleAmount(record)) {
       setSettlementRecord(record);
-      setProofImageUrl(record.settlement_proof_url || '');
+      setProofImageUrl(hasSettleProof(record) ? record.settlement_proof_url : '');
       setShowProofModal(true);
       return;
     }
     if (record.结算 === '已结算') return;
     setSettlementRecord(record);
     setShippingAmount('');
-    setSettlementImage(null);
-    setSettlementImagePreview(null);
     setShowShippingModal(true);
   };
 
@@ -1094,27 +1123,82 @@ function ReturnRegistration({ userRole, isMobile = false }) {
       alert('请输入有效金额');
       return;
     }
-    if (!settlementImage) {
-      alert('请上传结算凭证图片');
-      return;
-    }
+    // 凭证不再随金额提交，改为页面顶部统一上传后分发
     const rounded = Number(amount.toFixed(2));
+    const target = settlementRecord;
     try {
       const formData = new FormData();
       formData.append('amount', rounded.toString());
-      formData.append('settlement_image', settlementImage);
-      await api.post(`/customer/${settlementRecord.ID}/settlement-amount`, formData);
+      const res = await api.post(`/customer/${target.ID}/settlement-amount`, formData);
+      if (!res || !res.ok) {
+        alert('提交失败：' + (res?.data?.error || res?.data?.message || ('HTTP ' + (res?.status ?? ''))));
+        return;
+      }
       setShowShippingModal(false);
       setSettlementRecord(null);
       setShippingAmount('');
-      setSettlementImage(null);
-      setSettlementImagePreview(null);
+      if (isAdmin) {
+        // 金额已入库（行内变红底），登记到累计区等待统一上传凭证
+        setPendingBatch(prev => prev.some(p => p.id === target.ID)
+          ? prev.map(p => p.id === target.ID ? { ...p, amount: rounded } : p)
+          : [...prev, { id: target.ID, orderNo: target.订单编号 || '', amount: rounded }]);
+      }
       setPage(1);
       fetchRecords(1);
       fetchPendingSettlementRequests();
       fetchRejectedSettlementIds();
     } catch (error) {
-      alert('提交失败：' + (error.response?.data?.error || '未知错误'));
+      alert('提交失败：' + (error?.data?.error || error?.message || '网络异常'));
+    }
+  };
+
+  const handleBatchProofChange = (file) => {
+    if (!file) return;
+    setBatchProofFile(file);
+    const reader = new FileReader();
+    reader.onloadend = () => setBatchProofPreview(reader.result);
+    reader.readAsDataURL(file);
+  };
+
+  const removePendingBatchItem = (id) => {
+    setPendingBatch(prev => prev.filter(p => p.id !== id));
+  };
+
+  const clearPendingBatch = () => {
+    if (pendingBatch.length === 0) return;
+    if (!window.confirm('确定清空累计列表吗？\n\n已录入的金额不会从记录中删除，只是不再等待批量分发凭证。')) return;
+    setPendingBatch([]);
+    setBatchProofFile(null);
+    setBatchProofPreview(null);
+    setShowBatchDetail(false);
+  };
+
+  const handleConfirmBatchDistribute = async () => {
+    if (pendingBatch.length === 0) { alert('没有待分发的记录'); return; }
+    if (!batchProofFile) { alert('请先上传结算凭证'); return; }
+    const ids = pendingBatch.map(p => p.id);
+    if (!window.confirm(`确认将这张凭证分发给 ${ids.length} 条记录，合计 ¥${pendingBatchTotal.toFixed(2)}？\n\n分发后这些记录的结算标记会变成绿色。`)) return;
+    setBatchSubmitting(true);
+    try {
+      const formData = new FormData();
+      formData.append('settlement_image', batchProofFile);
+      formData.append('ids', JSON.stringify(ids));
+      const res = await api.post('/customer/batch-settlement-proof', formData);
+      if (!res || !res.ok) {
+        alert('分发失败：' + (res?.data?.error || res?.data?.message || ('HTTP ' + (res?.status ?? ''))));
+        return;
+      }
+      alert(`已分发到 ${res.data?.count ?? ids.length} 条记录`);
+      setPendingBatch([]);
+      setBatchProofFile(null);
+      setBatchProofPreview(null);
+      setShowBatchDetail(false);
+      setPage(1);
+      fetchRecords(1);
+    } catch (error) {
+      alert('分发失败：' + (error?.data?.error || error?.message || '网络异常'));
+    } finally {
+      setBatchSubmitting(false);
     }
   };
   
@@ -1188,7 +1272,46 @@ function ReturnRegistration({ userRole, isMobile = false }) {
         </button>
       </div>
 
-      <div style={{ background: '#fff', padding: isMobile ? '10px' : '12px', borderRadius: '8px', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: isMobile ? 'wrap' : 'nowrap' }}>
+      <div style={{ background: '#fff', padding: isMobile ? '10px' : '12px', borderRadius: '8px', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+        {isAdmin && pendingBatch.length > 0 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', background: '#fff5f5', border: '1px solid #f44336', borderRadius: '6px', flexWrap: 'wrap', flex: isMobile ? '1 1 100%' : '0 0 auto' }}>
+            <span style={{ fontSize: '12px', color: '#c62828', fontWeight: '500', whiteSpace: 'nowrap' }}>待分发</span>
+            <label
+              title={batchProofFile ? '点击重新选择凭证' : '上传结算凭证（多笔共用一张）'}
+              style={{ width: '28px', height: '28px', border: batchProofPreview ? '1px solid #f44336' : '1px dashed #f44336', borderRadius: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', fontSize: '16px', color: '#f44336', background: '#fff', overflow: 'hidden', flexShrink: 0 }}
+            >
+              {batchProofPreview ? <img src={batchProofPreview} alt="凭证" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : '+'}
+              <input type="file" accept="image/jpeg,image/jpg,image/png,image/gif" onChange={e => handleBatchProofChange(e.target.files[0])} style={{ display: 'none' }} />
+            </label>
+            <input
+              type="text"
+              placeholder="📋右键粘贴"
+              onPaste={(e) => { handleContainerPaste(e, (f) => handleBatchProofChange(f)); }}
+              style={{ width: '76px', height: '28px', fontSize: '11px', border: '1px dashed #1976d2', borderRadius: '4px', padding: '0 4px', outline: 'none', cursor: 'default', background: '#f0f7ff', color: '#1976d2', boxSizing: 'border-box' }}
+            />
+            <span onClick={() => setShowBatchDetail(v => !v)} style={{ fontSize: '12px', color: '#c62828', cursor: 'pointer', whiteSpace: 'nowrap', textDecoration: 'underline' }}>
+              {pendingBatch.length} 笔 ¥{pendingBatchTotal.toFixed(2)}
+            </span>
+            <button
+              onClick={handleConfirmBatchDistribute}
+              disabled={batchSubmitting}
+              style={{ padding: '4px 12px', background: batchSubmitting ? '#bdbdbd' : '#4caf50', color: '#fff', border: 'none', borderRadius: '4px', cursor: batchSubmitting ? 'default' : 'pointer', fontSize: '12px', whiteSpace: 'nowrap' }}
+            >
+              {batchSubmitting ? '分发中…' : '确认'}
+            </button>
+            <button onClick={clearPendingBatch} style={{ padding: '4px 8px', background: '#9e9e9e', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>清空</button>
+            {showBatchDetail && (
+              <div style={{ flexBasis: '100%', display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '2px' }}>
+                {pendingBatch.map(p => (
+                  <span key={p.id} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '2px 6px', background: '#fff', border: '1px solid #ffcdd2', borderRadius: '3px', fontSize: '11px', color: '#c62828' }}>
+                    {p.orderNo || ('#' + p.id)} ¥{Number(p.amount).toFixed(2)}
+                    <span title="移除" onClick={() => removePendingBatchItem(p.id)} style={{ cursor: 'pointer', color: '#f44336', fontWeight: 'bold' }}>×</span>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         {!isMobile && (
         <span style={{ fontSize: '13px', fontWeight: '500', width: isMobile ? '100%' : 'auto', marginBottom: isMobile ? '4px' : 0 }}>搜索：</span>
         )}
@@ -1542,7 +1665,7 @@ function ReturnRegistration({ userRole, isMobile = false }) {
                                 padding: '2px 8px', 
                                 borderRadius: '3px', 
                                 fontSize: '11px',
-                                background: (record.结算金额 || record.结算 === '已结算') ? '#4caf50' : '#ff9800',
+                                background: settlementBadgeBg(record),
                                 color: '#fff',
                                 whiteSpace: 'nowrap'
                               }}
@@ -1663,7 +1786,7 @@ function ReturnRegistration({ userRole, isMobile = false }) {
                                           padding: '2px 8px', 
                                           borderRadius: '3px', 
                                           fontSize: '11px',
-                                          background: (record.结算金额 || record.结算 === '已结算') ? '#4caf50' : '#ff9800',
+                                          background: settlementBadgeBg(record),
                                           color: '#fff',
                                           whiteSpace: 'nowrap'
                                         }}
@@ -2055,7 +2178,7 @@ function ReturnRegistration({ userRole, isMobile = false }) {
                       已驳回
                     </span>
                   ) : (
-                    <span onClick={(e) => { e.stopPropagation(); handleSettlementClick(record); }} style={{ padding: '2px 8px', borderRadius: '4px', fontSize: '11px', whiteSpace: 'nowrap', cursor: 'pointer', background: (record.结算金额 || record.结算 === '已结算') ? '#4caf50' : '#ff9800', color: '#fff' }}>
+                    <span onClick={(e) => { e.stopPropagation(); handleSettlementClick(record); }} style={{ padding: '2px 8px', borderRadius: '4px', fontSize: '11px', whiteSpace: 'nowrap', cursor: 'pointer', background: settlementBadgeBg(record), color: '#fff' }}>
                       {record.结算金额 ? Number(record.结算金额).toFixed(2) : (record.结算 === '已结算' ? '已结算' : '未结算')}
                     </span>
                   )}
@@ -2445,30 +2568,9 @@ function ReturnRegistration({ userRole, isMobile = false }) {
               />
               <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#999' }}>只能输入数字，保留两位小数</p>
             </div>
-            <div style={{ marginBottom: '16px' }}>
-              <label style={{ display: 'block', marginBottom: '8px', fontSize: '14px', color: '#333' }}>
-                结算凭证: <span style={{ color: '#f44336' }}>*</span>
-              </label>
-              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                <label style={{ width: '60px', height: '60px', border: '2px dashed #4caf50', borderRadius: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', fontSize: '32px', color: '#4caf50', background: '#f9f9f9' }}>
-                  +
-                  <input type="file" accept="image/jpeg,image/jpg,image/png,image/gif" onChange={handleSettlementImageChange} style={{ display: 'none' }} />
-                </label>
-                <input
-                  type="text"
-                  placeholder="📋 右键粘贴"
-                  onPaste={(e) => {
-                    handleContainerPaste(e, (f) => { setSettlementImage(f); const reader = new FileReader(); reader.onloadend = () => setSettlementImagePreview(reader.result); reader.readAsDataURL(f); });
-                  }}
-                  style={{ width: '85px', height: '28px', fontSize: '11px', border: '1px dashed #1976d2', borderRadius: '4px', padding: '0 4px', outline: 'none', cursor: 'default', background: '#f0f7ff', color: '#1976d2', boxSizing: 'border-box' }}
-                />
-              </div>
-              {settlementImagePreview && (
-                <div style={{ marginTop: '8px' }}>
-                  <img src={settlementImagePreview} alt="凭证预览" style={{ maxWidth: '100%', maxHeight: '150px', borderRadius: '4px', border: '1px solid #ddd' }} />
-                </div>
-              )}
-            </div>
+            <p style={{ margin: '0 0 16px 0', fontSize: '12px', color: '#999', lineHeight: '1.6' }}>
+              这里只录金额。提交后该行会变红，并累计到搜索栏左侧；等多笔录完，在左侧统一上传一张凭证点「确认」分发即可。
+            </p>
             <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
               <button onClick={() => { setShowShippingModal(false); setSettlementImage(null); setSettlementImagePreview(null); }} style={{ padding: '8px 16px', border: '1px solid #ddd', background: '#fff', borderRadius: '4px', cursor: 'pointer', fontSize: '14px' }}>取消</button>
               <button onClick={handleShippingAmountSubmit} style={{ padding: '8px 16px', border: 'none', background: '#4caf50', color: '#fff', borderRadius: '4px', cursor: 'pointer', fontSize: '14px' }}>提交</button>
@@ -2498,7 +2600,14 @@ function ReturnRegistration({ userRole, isMobile = false }) {
               </div>
             )}
             {!proofImageUrl && (
-              <p style={{ textAlign: 'center', color: '#999', fontSize: '14px' }}>暂无结算凭证</p>
+              <div style={{ textAlign: 'center', marginBottom: '16px' }}>
+                <p style={{ margin: '0 0 6px 0', color: '#f44336', fontSize: '13px' }}>
+                  该单金额已录入，等待上传结算凭证
+                </p>
+                <p style={{ margin: 0, color: '#999', fontSize: '12px', lineHeight: '1.6' }}>
+                  在搜索栏左侧统一上传凭证后点「确认」，即可批量分发
+                </p>
+              </div>
             )}
             <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
               {(() => { const u = JSON.parse(localStorage.getItem('user') || '{}'); return u?.role === 'admin' ? (

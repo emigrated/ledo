@@ -686,8 +686,11 @@ router.post('/:id/settlement-amount', settlementUpload.single('settlement_image'
       return res.status(400).json({ error: '金额不能为负数' });
     }
     
-    // 图片为必填项
-    if (!req.file) {
+    const isAdmin = req.user && req.user.role === 'admin';
+    
+    // 结算凭证改为选填：管理员可先只录金额（页面显示红底待分发），凭证随后批量补齐
+    // 普通用户仍走审核流，必须带图
+    if (!req.file && !isAdmin) {
       return res.status(400).json({ error: '请上传结算凭证图片' });
     }
     
@@ -698,16 +701,17 @@ router.post('/:id/settlement-amount', settlementUpload.single('settlement_image'
     
     const record = records[0];
     
-    const date = new Date();
-    const subPath = `${date.getFullYear()}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')}`;
-    const settlementProofUrl = `/uploads/image/${subPath}/${req.file.filename}`;
-    
-    const isAdmin = req.user && req.user.role === 'admin';
+    let settlementProofUrl = null;
+    if (req.file) {
+      const date = new Date();
+      const subPath = `${date.getFullYear()}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')}`;
+      settlementProofUrl = `/uploads/image/${subPath}/${req.file.filename}`;
+    }
     
     if (isAdmin) {
       // 管理员：直接更新记录
       await pool.execute(
-        'UPDATE customer SET 结算金额 = ?, settlement_proof_url = ?, 结算 = 0, 结算状态 = \'未结算\' WHERE ID = ?',
+        'UPDATE customer SET 结算金额 = ?, settlement_proof_url = COALESCE(?, settlement_proof_url), 结算 = 0, 结算状态 = \'未结算\' WHERE ID = ?',
         [numAmount, settlementProofUrl, id]
       );
       
@@ -765,6 +769,76 @@ router.post('/:id/settlement-amount', settlementUpload.single('settlement_image'
   }
 });
 
+// 批量分发结算凭证：上传一次凭证，写入多条记录的 settlement_proof_url
+router.post('/batch-settlement-proof', settlementUpload.single('settlement_image'), async (req, res) => {
+  try {
+    const isAdmin = req.user && req.user.role === 'admin';
+    if (!isAdmin) {
+      return res.status(403).json({ error: '仅管理员可执行批量分发' });
+    }
+
+    let ids;
+    try {
+      ids = JSON.parse(req.body.ids || '[]');
+    } catch (e) {
+      return res.status(400).json({ error: 'ids 参数格式错误' });
+    }
+    ids = (Array.isArray(ids) ? ids : []).map(v => parseInt(v, 10)).filter(v => !isNaN(v));
+    if (ids.length === 0) {
+      return res.status(400).json({ error: '请选择要分发的记录' });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: '请上传结算凭证图片' });
+    }
+
+    const date = new Date();
+    const subPath = `${date.getFullYear()}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')}`;
+    const settlementProofUrl = `/uploads/image/${subPath}/${req.file.filename}`;
+
+    const placeholders = ids.map(() => '?').join(',');
+
+    // 只处理已录入金额的记录，避免把凭证写到空单上
+    const [targets] = await pool.execute(
+      `SELECT ID FROM customer WHERE ID IN (${placeholders}) AND 结算金额 IS NOT NULL`,
+      ids
+    );
+    const validIds = targets.map(r => r.ID);
+    if (validIds.length === 0) {
+      return res.status(400).json({ error: '所选记录均未录入结算金额' });
+    }
+
+    const validPh = validIds.map(() => '?').join(',');
+    await pool.execute(
+      `UPDATE customer SET settlement_proof_url = ?, 结算 = 0, 结算状态 = '未结算' WHERE ID IN (${validPh})`,
+      [settlementProofUrl, ...validIds]
+    );
+
+    // 写分发痕迹，便于日后追溯这张凭证发给了哪些单
+    try {
+      for (const rid of validIds) {
+        await pool.execute(
+          'INSERT INTO settlement_records (registration_id, image_url, image_name, image_type, status, created_by) VALUES (?, ?, ?, ?, ?, ?)',
+          [rid, settlementProofUrl, req.file.originalname, req.file.mimetype, 'distributed', req.user?.userId || null]
+        );
+      }
+    } catch (logErr) {
+      logger.error('Failed to write settlement_records:', logErr);
+    }
+
+    logger.info(`Batch settlement proof distributed to ${validIds.length} records by user ${req.user?.userId}`);
+
+    res.json({
+      message: `已分发到 ${validIds.length} 条记录`,
+      count: validIds.length,
+      ids: validIds,
+      settlement_proof_url: settlementProofUrl
+    });
+  } catch (error) {
+    logger.error('Batch settlement proof error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.post('/:id/settlement-cancel', async (req, res) => {
   try {
     const { id } = req.params;
@@ -814,16 +888,24 @@ router.delete('/:id/settlement-proof', async (req, res) => {
     
     const record = records[0];
     
-    // 删除客户记录上的物理文件
+    // 删除客户记录上的物理文件（若该凭证被其他记录共享则保留文件，只清字段）
     if (record.settlement_proof_url) {
-      const filePath = path.join(__dirname, '..', '..', record.settlement_proof_url);
-      try {
-        if (fs.existsSync(filePath)) {
-          fs.unlinkSync(filePath);
-          logger.info(`Deleted settlement proof file: ${filePath}`);
+      const [shared] = await pool.execute(
+        'SELECT COUNT(*) as cnt FROM customer WHERE settlement_proof_url = ? AND ID <> ?',
+        [record.settlement_proof_url, id]
+      );
+      if (shared[0].cnt > 0) {
+        logger.info(`Settlement proof ${record.settlement_proof_url} still used by ${shared[0].cnt} other record(s), file kept`);
+      } else {
+        const filePath = path.join(__dirname, '..', '..', record.settlement_proof_url);
+        try {
+          if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+            logger.info(`Deleted settlement proof file: ${filePath}`);
+          }
+        } catch (fileErr) {
+          logger.error('Failed to delete settlement proof file:', fileErr);
         }
-      } catch (fileErr) {
-        logger.error('Failed to delete settlement proof file:', fileErr);
       }
     }
     
