@@ -5,23 +5,41 @@ import { fmtTime, fmtDate } from '../utils/time';
 import { copyToClipboard } from '../utils/clipboard';
 const PAGE_SIZE = 20;
 
+// 一键录单草稿：手机浏览器切到其他 APP 时，后台标签页可能被系统回收，
+// 切回来浏览器会重新加载页面、React 状态全丢。这里把已填内容落盘，回来自动恢复。
+const ORDER_DRAFT_KEY = 'orderEntryDraft';
+const ORDER_DRAFT_TTL = 24 * 60 * 60 * 1000; // 超过 24 小时的草稿自动丢弃
+
+const emptyOrderForm = () => ({
+  客户信息: '', 平台: '', 订单编号: '', 品牌: '', 型号: '',
+  类型: '', 颜色: '', 规格: '', 价格: '', 购买件数: '', 备注: ''
+});
+
+// 数字时间戳专用（utils 里的 fmtTime 只处理字符串）
+const fmtStamp = (ts) => {
+  try {
+    if (!ts) return '';
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+  } catch {
+    return '';
+  }
+};
+
+const currentUserId = () => {
+  try {
+    return JSON.parse(localStorage.getItem('user') || '{}')?.id || '';
+  } catch {
+    return '';
+  }
+};
+
 function OrderEntry({ isMobile = false }) {
   const [showModal, setShowModal] = useState(false);
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [formData, setFormData] = useState({
-    客户信息: '',
-    平台: '',
-    订单编号: '',
-    品牌: '',
-    型号: '',
-    类型: '',
-    颜色: '',
-    规格: '',
-    价格: '',
-    购买件数: '',
-    备注: ''
-  });
+  const [formData, setFormData] = useState(emptyOrderForm);
   const [options, setOptions] = useState({
     brands: [],
     models: [],
@@ -60,17 +78,59 @@ function OrderEntry({ isMobile = false }) {
   const [checkingDuplicate, setCheckingDuplicate] = useState(false);
   const duplicateTimerRef = useRef(null);
 
+  // 草稿相关：draftMeta 有值表示本次是「恢复出来的」，用于顶部提示
+  const [draftMeta, setDraftMeta] = useState(null);
+  const [hasDraft, setHasDraft] = useState(false);
+  const [draftReady, setDraftReady] = useState(false);
+
   useEffect(() => {
-    fetchOptions();
+    let cancelled = false;
+    // 顺序很重要：先把品牌等基础选项取回来，再恢复草稿里的级联选项，
+    // 否则 fetchOptions 的 setOptions 会把恢复的 models/types/colors/specs 覆盖成空。
+    (async () => {
+      try {
+        await fetchOptions();
+      } catch (e) {
+        console.error('加载选项失败:', e);
+      }
+      if (!cancelled) await tryRestoreDraft();
+    })();
     fetchRecords();
-    
+
     // 清理定时器
     return () => {
+      cancelled = true;
       if (duplicateTimerRef.current) {
         clearTimeout(duplicateTimerRef.current);
       }
     };
   }, []);
+
+  // 草稿自动保存：输入变化 300ms 后落盘（同时记录窗口是否开着）
+  useEffect(() => {
+    if (!draftReady) return;
+    const timer = setTimeout(() => {
+      const hasContent = Object.values(formData).some(v => String(v ?? '').trim() !== '');
+      if (!hasContent) {
+        localStorage.removeItem(ORDER_DRAFT_KEY);
+        setHasDraft(false);
+        return;
+      }
+      try {
+        localStorage.setItem(ORDER_DRAFT_KEY, JSON.stringify({
+          formData,
+          unitPrice,
+          modalOpen: showModal,
+          savedAt: Date.now(),
+          userId: currentUserId()
+        }));
+        setHasDraft(true);
+      } catch (e) {
+        // 隐私模式或存储已满时忽略，不影响正常录入
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [formData, unitPrice, showModal, draftReady]);
 
   const fetchOptions = async () => {
     try {
@@ -107,22 +167,97 @@ function OrderEntry({ isMobile = false }) {
     fetchRecords(newPage);
   };
 
+  // 恢复草稿的级联下拉选项：品牌→型号→类型→颜色→规格 逐级补回来，
+  // 否则表单值在、下拉是空的，用户一改就丢值。
+  const restoreCascadeOptions = async (d) => {
+    try {
+      if (!d.品牌) return;
+      const modelsRes = await api.get(`/product-data/models?brand=${encodeURIComponent(d.品牌)}`);
+      setOptions(prev => ({ ...prev, models: modelsRes.data?.models || [] }));
+      if (!d.型号) return;
+
+      const typesRes = await api.get(`/product-data/types?brand=${encodeURIComponent(d.品牌)}&model=${encodeURIComponent(d.型号)}`);
+      setOptions(prev => ({ ...prev, types: typesRes.data?.types || [] }));
+      if (!d.类型) return;
+
+      const colorsRes = await api.get(`/product-data/colors?brand=${encodeURIComponent(d.品牌)}&model=${encodeURIComponent(d.型号)}&type=${encodeURIComponent(d.类型)}`);
+      setOptions(prev => ({ ...prev, colors: colorsRes.data?.colors || [] }));
+      if (!d.颜色) return;
+
+      const specsRes = await api.get(`/product-data/specs?brand=${encodeURIComponent(d.品牌)}&model=${encodeURIComponent(d.型号)}&type=${encodeURIComponent(d.类型)}&color=${encodeURIComponent(d.颜色)}`);
+      setOptions(prev => ({ ...prev, specs: specsRes.data?.specs || [] }));
+    } catch (e) {
+      console.error('恢复草稿选项失败:', e);
+    }
+  };
+
+  // 页面加载时尝试恢复上次未提交的录单内容
+  const tryRestoreDraft = async () => {
+    try {
+      const raw = localStorage.getItem(ORDER_DRAFT_KEY);
+      if (!raw) return;
+      const draft = JSON.parse(raw);
+      if (!draft || !draft.formData) return;
+
+      // 换账号登录时不恢复别人的草稿
+      const uid = currentUserId();
+      if (draft.userId && uid && String(draft.userId) !== String(uid)) {
+        localStorage.removeItem(ORDER_DRAFT_KEY);
+        return;
+      }
+      // 太旧的草稿直接丢弃
+      if (!draft.savedAt || Date.now() - draft.savedAt > ORDER_DRAFT_TTL) {
+        localStorage.removeItem(ORDER_DRAFT_KEY);
+        return;
+      }
+
+      const data = { ...emptyOrderForm(), ...draft.formData };
+      const hasContent = Object.values(data).some(v => String(v ?? '').trim() !== '');
+      if (!hasContent) {
+        localStorage.removeItem(ORDER_DRAFT_KEY);
+        return;
+      }
+
+      setFormData(data);
+      setUnitPrice(Number(draft.unitPrice) || 0);
+      setDraftMeta({ savedAt: draft.savedAt });
+      setHasDraft(true);
+      // 只有刷新前窗口是开着的才自动弹回来；用户自己点过取消的，只在页面上留个入口
+      if (draft.modalOpen) setShowModal(true);
+
+      await restoreCascadeOptions(data);
+    } catch (e) {
+      console.error('恢复录单草稿失败:', e);
+    } finally {
+      setDraftReady(true);
+    }
+  };
+
+  const clearOrderDraft = () => {
+    try {
+      localStorage.removeItem(ORDER_DRAFT_KEY);
+    } catch (e) { /* 忽略 */ }
+    setHasDraft(false);
+    setDraftMeta(null);
+  };
+
+  const handleResumeDraft = () => {
+    setShowModal(true);
+  };
+
+  const handleDiscardDraft = () => {
+    if (!window.confirm('确定放弃未提交的录单内容吗？放弃后不可恢复。')) return;
+    clearOrderDraft();
+    setFormData(emptyOrderForm());
+    setUnitPrice(0);
+    setOptions(prev => ({ ...prev, models: [], types: [], colors: [], specs: [] }));
+  };
+
   const handleOpenModal = () => {
     setShowModal(true);
     setUnitPrice(0);
-    setFormData({
-      客户信息: '',
-      平台: '',
-      订单编号: '',
-      品牌: '',
-      型号: '',
-      类型: '',
-      颜色: '',
-      规格: '',
-      价格: '',
-      购买件数: '',
-      备注: ''
-    });
+    setDraftMeta(null);
+    setFormData(emptyOrderForm());
     setOptions(prev => ({
       ...prev,
       models: [],
@@ -268,6 +403,12 @@ function OrderEntry({ isMobile = false }) {
         id: response.data.id
       });
       setShowSuccessModal(true);
+
+      // 提交成功：清掉草稿并复位表单，避免下次打开又带出旧内容
+      clearOrderDraft();
+      setFormData(emptyOrderForm());
+      setUnitPrice(0);
+      setOptions(prev => ({ ...prev, models: [], types: [], colors: [], specs: [] }));
     } catch (error) {
       console.error('订单录入失败:', error);
       alert('订单录入失败: ' + (error.response?.data?.error || error.message));
@@ -561,20 +702,28 @@ ${actionRecord.备注 ? `备注：${actionRecord.备注}\n` : ''}
     <div style={{ padding: isMobile ? '8px' : '16px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: isMobile ? '12px' : '16px' }}>
         <h3 style={{ margin: 0, fontSize: isMobile ? '16px' : '18px', fontWeight: '600' }}>订单录入</h3>
-        <button
-          onClick={handleOpenModal}
-          style={{
-            padding: '6px 14px',
-            background: '#1976d2',
-            color: '#fff',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            fontSize: '13px'
-          }}
-        >
-          一键录单
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          {hasDraft && !showModal && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px', background: '#fff8e1', border: '1px solid #ffb300', borderRadius: '4px', padding: '3px 6px' }}>
+              <span onClick={handleResumeDraft} style={{ fontSize: '12px', color: '#e65100', cursor: 'pointer', whiteSpace: 'nowrap' }}>继续填写草稿</span>
+              <span onClick={handleDiscardDraft} title="放弃草稿" style={{ fontSize: '14px', color: '#999', cursor: 'pointer', lineHeight: 1 }}>×</span>
+            </div>
+          )}
+          <button
+            onClick={handleOpenModal}
+            style={{
+              padding: '6px 14px',
+              background: '#1976d2',
+              color: '#fff',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontSize: '13px'
+            }}
+          >
+            一键录单
+          </button>
+        </div>
       </div>
 
       {/* 订单记录列表 */}
@@ -700,6 +849,12 @@ ${actionRecord.备注 ? `备注：${actionRecord.备注}\n` : ''}
             overflow: 'auto'
           }}>
             <h3 style={{ margin: '0 0 16px 0', fontSize: '18px', fontWeight: '600' }}>录入订单</h3>
+
+            {draftMeta && (
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', padding: '8px 12px', marginBottom: '12px', background: '#e8f5e9', border: '1px solid #81c784', borderRadius: '6px', fontSize: '13px', color: '#2e7d32', lineHeight: '1.5' }}>
+                <span>✅ 已恢复上次未提交的内容（{fmtStamp(draftMeta.savedAt)}）。核对无误后直接提交即可，提交后草稿自动清除。</span>
+              </div>
+            )}
             
             <form onSubmit={handleSubmit}>
               <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: '12px' }}>
