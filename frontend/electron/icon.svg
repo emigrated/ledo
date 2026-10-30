@@ -1,0 +1,35 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+    <linearGradient id="markGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="50%" stop-color="#0ea5e9"/>
+      <stop offset="100%" stop-color="#2563eb"/>
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#06b6d4"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+  </defs>
+  <!-- Background - rounded corners -->
+  <rect x="0" y="0" width="512" height="512" rx="96" fill="url(#bgGrad)"/>
+  
+  <!-- Subtle decorative ring -->
+  <circle cx="256" cy="256" r="170" fill="none" stroke="rgba(56,189,248,0.08)" stroke-width="2"/>
+  <circle cx="256" cy="256" r="185" fill="none" stroke="rgba(56,189,248,0.05)" stroke-width="1"/>
+  
+  <!-- Abstract L mark - vertical bar -->
+  <path d="M136 148 C136 130.4 150.4 116 168 116 L248 116 C265.6 116 280 130.4 280 148 L280 280 C280 297.6 265.6 312 248 312 L168 312 C150.4 312 136 297.6 136 280 Z" fill="url(#markGrad)"/>
+  
+  <!-- Abstract L mark - horizontal bar / check-like element -->
+  <path d="M200 312 L200 380 C200 397.6 214.4 412 232 412 L312 412 C329.6 412 344 397.6 344 380 L344 320 C344 302.4 329.6 288 312 288 L232 288 C214.4 288 200 302.4 200 320 Z" fill="url(#accentGrad)" opacity="0.9"/>
+  
+  <!-- Small accent dot -->
+  <circle cx="340" cy="165" r="12" fill="url(#accentGrad)" opacity="0.7"/>
+  
+  <!-- Inner glow highlight -->
+  <ellipse cx="200" cy="180" rx="40" ry="25" fill="rgba(255,255,255,0.06)" transform="rotate(-30, 200, 180)"/>
+</svg>

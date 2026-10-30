@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  backend:
+    image: node:18-alpine
+    container_name: ledo-backend
+    ports:
+      - "3003:3003"
+    environment:
+      - PORT=3003
+      - DB_HOST=192.168.1.254
+      - DB_PORT=3306
+      - DB_USER=kaifazhe
+      - DB_PASSWORD=.xyPL615Be//ff-I
+      - DB_NAME=kaifazhe
+      - JWT_SECRET=ledo-secret-key-2024
+      - JWT_REFRESH_SECRET=ledo-refresh-secret-2024
+    volumes:
+      - ./src:/app/src
+      - ./package.json:/app/package.json
+      - ./init_db.sql:/app/init_db.sql
+    working_dir: /app
+    command: sh -c "npm install && node src/index.js"
+    restart: unless-stopped
+    networks:
+      - ledo-network
+
+networks:
+  ledo-network:
+    driver: bridge

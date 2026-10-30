@@ -1,0 +1,53 @@
+# ===== 依赖 =====
+node_modules/
+**/node_modules/
+
+# ===== 构建产物 =====
+frontend/dist/
+frontend/dist-docker/
+frontend/release/
+frontend/electron/dist/
+frontend/dist_index_*.html
+
+# ===== 运行时数据（不进版本库）=====
+mysql_data/
+backend/uploads/
+backend/scripts/uploads/
+logs/
+tmp/
+artifacts/
+*.log
+*.tar.gz
+*.zip
+
+# ===== 环境变量（含密钥）=====
+.env
+.env.local
+.env.production
+backend/.env
+frontend/.env
+!.env.example
+
+# ===== macOS / 群晖垃圾文件 =====
+.DS_Store
+._*
+.Spotlight-V100/
+.TemporaryItems/
+@eaDir/
+Thumbs.db
+ehthumbs.db
+
+# ===== 编辑器 =====
+.vscode/
+.idea/
+*.swp
+*~
+
+# ===== 临时/备份 =====
+*.bak
+*.backup.*
+__pycache__/
+
+# ===== AI 工具缓存 =====
+.open-mem/
+opencode/

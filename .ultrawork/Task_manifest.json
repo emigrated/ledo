@@ -1,0 +1,13 @@
+{
+  "task_id": "auto_complete_001",
+  "description": "Automatically fulfil the user instruction '同意，请你自动完成'",
+  "steps": [
+    {"id": "step1", "name": "Initialize environment"},
+    {"id": "step2", "name": "Execute auto completion"},
+    {"id": "step3", "name": "Finalize and verify"}
+  ],
+  "on_complete": {
+    "signal": "<promise>DONE</promise>",
+    "evidence": ".ultrawork/evidence/auto_complete_001.md"
+  }
+}

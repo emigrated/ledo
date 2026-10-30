@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: ledo-db
+    environment:
+      - TZ=Asia/Shanghai
+      - MYSQL_ROOT_PASSWORD=root
+      - MYSQL_DATABASE=kaifazhe
+      - MYSQL_CHARSET=utf8mb4
+    command: --default-time-zone='+08:00'
+    ports:
+      - "13306:3306"
+    volumes:
+      - ./mysql_data:/var/lib/mysql
+      - ./backend/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+    restart: unless-stopped
+    networks:
+      - ledo-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  backend:
+    image: ledo-backend:latest
+    container_name: ledo-backend
+    depends_on:
+      - db
+    ports:
+      - "3003:3003"
+    environment:
+      - TZ=Asia/Shanghai
+      - PORT=3003
+      - DB_HOST=db
+      - DB_PORT=3306
+      - DB_USER=root
+      - DB_PASSWORD=root
+      - DB_NAME=kaifazhe
+      - JWT_SECRET=ledo-secret-key-2024
+      - JWT_REFRESH_SECRET=ledo-refresh-secret-2024
+      - NODE_ENV=production
+      - UPLOAD_PATH=/app/uploads
+    volumes:
+      - ./backend/uploads:/app/uploads
+    working_dir: /app
+    restart: unless-stopped
+    networks:
+      - ledo-network
+
+  frontend:
+    image: ledo-frontend:latest
+    container_name: ledo-frontend
+    depends_on:
+      - backend
+    ports:
+      - "5173:5173"
+    build:
+      context: ./frontend
+      args:
+        - VITE_API_BASE_URL=https://emigrated.i234.me:3443
+    environment:
+      - TZ=Asia/Shanghai
+      - VITE_API_BASE_URL=https://emigrated.i234.me:3443
+      - HOST=0.0.0.0
+    restart: unless-stopped
+    networks:
+      - ledo-network
+
+networks:
+  ledo-network:
+    driver: bridge

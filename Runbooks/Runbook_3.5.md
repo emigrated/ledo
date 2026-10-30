@@ -1,0 +1,12 @@
+# Runbook 3.5 - Evidence Consolidation (Expanded Skeleton)
+- ## Objective
+- Outline consolidation flow for Wave 1 and Wave 3 evidence with explicit cross-links to Evidence_Metadata_Schema and Evidence Map.
+- ## Inputs
+- Wave1/Wave3 artifacts placeholders with references to artifacts in Artifact_Spec.yaml
+- ## Steps
+- - Step 1: Normalize references; align with Evidence_Metadata_Schema
+- - Step 2: Prepare Final_Verification_Report skeleton and ledger references
+- ## Outputs
+- Consolidated skeleton artifacts references with explicit artifact mappings
+- ## Verification
+- Alignment with Evidence Map and Runbooks 3.1–3.4; ensure cross-artifact traceability

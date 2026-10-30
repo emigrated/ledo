@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>企业内部登记系统</title>
+    <style>
+      /* 在 CSS 加载前就应用默认字体大小，防止闪屏 */
+      html {
+        font-size: 14px;
+      }
+      body {
+        font-size: 14px;
+        margin: 0;
+        padding: 0;
+      }
+      /* 所有元素继承字体大小 */
+      * {
+        font-size: inherit;
+      }
+      /* 排除侧边栏 */
+      aside, aside * {
+        font-size: 14px !important;
+      }
+    </style>
+    <script>
+      // 在页面加载前应用字体大小设置，防止闪烁
+      (function() {
+        try {
+          const savedSettings = localStorage.getItem('userSettings');
+          let fontSize = 100;
+          
+          if (savedSettings) {
+            const parsed = JSON.parse(savedSettings);
+            fontSize = parsed.font_size || 100;
+          }
+          
+          const baseFontSize = 14;
+          const scale = fontSize / 100;
+          const newBaseSize = baseFontSize * scale;
+          
+          // 立即设置 html 和 body 的字体大小
+          document.documentElement.style.fontSize = `${newBaseSize}px`;
+          
+          // 使用 document.write 在 body 加载前就设置样式，完全防止闪屏
+          document.write(`<style>
+            html { font-size: ${newBaseSize}px !important; }
+            body { font-size: ${newBaseSize}px !important; }
+            * { font-size: inherit !important; }
+            aside, aside * { font-size: ${newBaseSize}px !important; }
+          </style>`);
+        } catch (e) {
+          console.error('Failed to apply font size:', e);
+        }
+      })();
+    </script>
+    <script type="module" crossorigin src="/assets/index.o_vDvRV0.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/style.Bvt4XnXL.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

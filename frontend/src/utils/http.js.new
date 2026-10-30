@@ -1,0 +1,195 @@
+import API_BASE_URL from '../config/api';
+
+let isRefreshing = false;
+let refreshSubscribers = [];
+
+function buildUrl(url) {
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    return url;
+  }
+  const base = API_BASE_URL.endsWith('/') ? API_BASE_URL : API_BASE_URL + '/';
+  // Remove leading slash if present
+  const path = url.startsWith('/') ? url.slice(1) : url;
+  // Ensure /api prefix
+  const apiPrefix = 'api/';
+  const fullPath = path.startsWith('api/') ? path : apiPrefix + path;
+  return base + fullPath;
+}
+
+function buildAuthUrl(path) {
+  const base = API_BASE_URL.endsWith('/') ? API_BASE_URL : API_BASE_URL + '/';
+  return base + 'api/' + (path.startsWith('/') ? path.slice(1) : path);
+}
+
+function getToken() {
+  return localStorage.getItem('token');
+}
+
+function setTokens(token, refreshToken) {
+  localStorage.setItem('token', token);
+  if (refreshToken) {
+    localStorage.setItem('refreshToken', refreshToken);
+  }
+}
+
+function clearAuth() {
+  localStorage.removeItem('token');
+  localStorage.removeItem('refreshToken');
+  localStorage.removeItem('user');
+}
+
+function onRefreshed(newToken) {
+  refreshSubscribers.forEach(cb => cb(newToken));
+  refreshSubscribers = [];
+}
+
+async function refreshAccessToken() {
+  const refreshToken = localStorage.getItem('refreshToken');
+  if (!refreshToken) {
+    throw new Error('No refresh token');
+  }
+
+  const response = await fetch(buildAuthUrl('auth/refresh'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refreshToken })
+  });
+
+  if (!response.ok) {
+    throw new Error('Refresh failed');
+  }
+
+  const data = await response.json();
+  setTokens(data.token, data.refreshToken);
+  return data.token;
+}
+
+async function fetchWithRefresh(url, options) {
+  const token = getToken();
+  const headers = { ...options.headers };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  let response = await fetch(url, { ...options, headers });
+
+  // 401 且存在 refresh token → 自动刷新重试
+  if (response.status === 401 && localStorage.getItem('refreshToken')) {
+    if (!isRefreshing) {
+      isRefreshing = true;
+      try {
+        const newToken = await refreshAccessToken();
+        isRefreshing = false;
+        onRefreshed(newToken);
+
+        // 用新 token 重试原始请求
+        headers.Authorization = `Bearer ${newToken}`;
+        response = await fetch(url, { ...options, headers });
+        return response;
+      } catch (err) {
+        isRefreshing = false;
+        refreshSubscribers = [];
+        clearAuth();
+        return response;
+      }
+    } else {
+      // 其他请求在等待刷新完成
+      const newToken = await new Promise(resolve => {
+        refreshSubscribers.push(resolve);
+      });
+      headers.Authorization = `Bearer ${newToken}`;
+      response = await fetch(url, { ...options, headers });
+      return response;
+    }
+  }
+
+  return response;
+}
+
+export async function get(url) {
+  try {
+    const response = await fetchWithRefresh(buildUrl(url), { method: 'GET' });
+
+    const text = await response.text();
+    let data;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = text;
+    }
+
+    return { ok: response.ok, status: response.status, data };
+  } catch (error) {
+    throw error;
+  }
+}
+
+export async function post(url, body) {
+  const isFormData = body instanceof FormData;
+  const headers = isFormData ? {} : { 'Content-Type': 'application/json' };
+
+  try {
+    const response = await fetchWithRefresh(buildUrl(url), {
+      method: 'POST',
+      headers,
+      body: isFormData ? body : JSON.stringify(body)
+    });
+
+    const text = await response.text();
+    let data;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = text;
+    }
+
+    return { ok: response.ok, status: response.status, data };
+  } catch (error) {
+    throw error;
+  }
+}
+
+export async function put(url, body) {
+  try {
+    const response = await fetchWithRefresh(buildUrl(url), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+
+    const text = await response.text();
+    let data;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = text;
+    }
+
+    return { ok: response.ok, status: response.status, data };
+  } catch (error) {
+    throw error;
+  }
+}
+
+export async function del(url) {
+  try {
+    const response = await fetchWithRefresh(buildUrl(url), {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    const text = await response.text();
+    let data;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = text;
+    }
+
+    return { ok: response.ok, status: response.status, data };
+  } catch (error) {
+    throw error;
+  }
+}
+
+export default { get, post, put, del, delete: del };

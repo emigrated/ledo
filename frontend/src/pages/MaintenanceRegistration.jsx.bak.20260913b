@@ -1,0 +1,3224 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { formatOrderNo } from '../utils/validation';
+import api from '../utils/api';
+import API_BASE_URL from '../config/api';
+import Pagination from '../components/Pagination';
+import { fmtTime, fmtDate } from '../utils/time';
+import { copyToClipboard } from '../utils/clipboard';
+import { applyTableLabels } from '../utils/responsiveTable';
+const PAGE_SIZE = 20;
+
+function MaintenanceRegistration({ isMobile = false }) {
+  const user = JSON.parse(localStorage.getItem('user') || '{}');
+  const isAdmin = user?.role === 'admin';
+      const statusColors = { '待处理': '#ff9800', '维修中': '#1976d2', '待审核': '#ff9800', '已完成': '#333', '预登记': '#9e9e9e' };
+  const paymentColors = { '已支付': '#4caf50', '无费用': '#9e9e9e', '待审核': '#ff9800', '已驳回': '#f44336', '拒维修': '#ff5722' };
+  const [records, setRecords] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [showForm, setShowForm] = useState(false);
+  const [expandedRows, setExpandedRows] = useState({});
+  const [search, setSearch] = useState('');
+  
+  const [selectedFiles, setSelectedFiles] = useState([]);
+  const [filePreviews, setFilePreviews] = useState([]);
+  const [barcodeFiles, setBarcodeFiles] = useState([]);
+  const [barcodeFilePreviews, setBarcodeFilePreviews] = useState([]);
+  
+  const [showPreviewModal, setShowPreviewModal] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState('');
+  const [previewType, setPreviewType] = useState('');
+  
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editingRecord, setEditingRecord] = useState(null);
+  const [editFormData, setEditFormData] = useState({});
+  const [originalRecord, setOriginalRecord] = useState({});
+  const [editErrors, setEditErrors] = useState({});
+  const [editSelectedFiles, setEditSelectedFiles] = useState([]);
+  const [editFilePreviews, setEditFilePreviews] = useState([]);
+  const [editBarcodeFiles, setEditBarcodeFiles] = useState([]);
+  const [editBarcodeFilePreviews, setEditBarcodeFilePreviews] = useState([]);
+  const [changeHistory, setChangeHistory] = useState({});
+  const [attachments, setAttachments] = useState({});
+  const [paymentProof, setPaymentProof] = useState({});
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [currentPaymentRecord, setCurrentPaymentRecord] = useState(null);
+  const [paymentStatus, setPaymentStatus] = useState('');
+  const [paymentImage, setPaymentImage] = useState(null);
+  const [paymentImagePreview, setPaymentImagePreview] = useState(null);
+  const [showRejectDialog, setShowRejectDialog] = useState(false);
+  const [editAddressOptions, setEditAddressOptions] = useState({
+    provinces: [],
+    cities: [],
+    districts: [],
+    towns: []
+  });
+  
+  const [quickReturnEdit, setQuickReturnEdit] = useState({});
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [successRecord, setSuccessRecord] = useState(null);
+
+  const IMMUTABLE_FIELDS = ['维修单号', '登记人', 'ID', '创建时间'];
+  
+  const [options, setOptions] = useState({
+    brands: [],
+    models: [],
+    types: [],
+    colors: [],
+    specs: [],
+    reasons: [],
+    statuses: [],
+    couriers: [],
+    warehouses: [],
+    platforms: [],
+    battery_requires: [],
+    repair_platforms: [],
+    return_reasons: []
+  });
+
+  const [addressOptions, setAddressOptions] = useState({
+    provinces: [],
+    cities: [],
+    districts: [],
+    towns: []
+  });
+
+  const [formData, setFormData] = useState({
+    维修单号: '',
+    省份: '', 省份adcode: '', 城市: '', 城市adcode: '', 区县: '', 区县adcode: '', 镇街道: '', 镇街道adcode: '', 详细地址: '',
+    联系人: '', 联系电话: '',
+    品牌: '', 型号: '', 类型: '', 颜色: '',
+    电池要求: '', 购买日期: '', 购买平台: '',
+     订单编号: '', 保修状态: '已过质保期', 返厂原因: '', 故障描述: '',
+     返厂快递: '', 返厂单号: '', 寄回快递: '', 寄回单号: '',
+     登记人: '', 状态: '', 报修平台: '', 备注: ''
+   });
+
+  const [errors, setErrors] = useState({});
+  const [courierError, setCourierError] = useState('');
+  const courierCheckTimer = useRef(null);
+  const [smartPasteText, setSmartPasteText] = useState('');
+
+  const generateMaintenanceNo = () => {
+    const d = new Date();
+    const pad = (n) => (n < 10 ? `0${n}` : `${n}`);
+    const y = d.getFullYear();
+    const m = pad(d.getMonth() + 1);
+    const day = pad(d.getDate());
+    const ts = d.getTime().toString().slice(-6);
+    const rand = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+    return `WX${y}${m}${day}${ts}${rand}`;
+  };
+
+  // 计算从登记时间至今的时效（天/时，不含分秒）
+  const calcElapsed = (createdAt) => {
+    if (!createdAt) return '-';
+    const start = new Date(createdAt.includes('T') ? createdAt : createdAt.replace(' ', 'T') + '+08:00').getTime();
+    if (isNaN(start)) return '-';
+    const diffMs = Date.now() - start;
+    if (diffMs < 0) return '未开始';
+    const totalHours = Math.floor(diffMs / (1000 * 60 * 60));
+    const days = Math.floor(totalHours / 24);
+    const hours = totalHours % 24;
+    if (days > 0) return `登记${days}天${hours}时`;
+    return `登记${hours}时`;
+  };
+
+  const fetchRecords = async (p) => {
+    const currentPage = p || page;
+    setLoading(true);
+    try {
+      const res = await api.get(`/maintenance?page=${currentPage}&limit=${PAGE_SIZE}`);
+      const list = Array.isArray(res.data) ? res.data : res.data?.data ?? [];
+      const totalCount = res.data?.total || list.length;
+
+      // 分组排序：待处理 > 维修中 > 待审核 > 已完成（后端已按此顺序返回），每组按各自时间排序
+      const groupOrder = { '待处理': 1, '维修中': 2, '待审核': 3, '已完成': 4, '预登记': 5 };
+      const parseTime = (s) => {
+        if (!s) return 0;
+        if (typeof s === 'string' && (s.endsWith('Z') || s.includes('T'))) {
+          return new Date(s).getTime();
+        }
+        return new Date(s.replace(' ', 'T') + '+08:00').getTime();
+      };
+      const getSortTime = (rec, status) => {
+        switch (status) {
+          case '待处理': return parseTime(rec.创建时间);
+          case '维修中': return parseTime(rec.维修中时间 || rec.创建时间);
+          case '待审核': return parseTime(rec.待审核时间 || rec.创建时间);
+          case '已完成': return parseTime(rec.完成时间 || rec.创建时间);
+          default: return parseTime(rec.创建时间);
+        }
+      };
+      const sortedList = list.sort((a, b) => {
+        const statusA = a.状态 || '待处理';
+        const statusB = b.状态 || '待处理';
+        const groupA = groupOrder[statusA] || 99;
+        const groupB = groupOrder[statusB] || 99;
+        if (groupA !== groupB) return groupA - groupB;
+        return getSortTime(b, statusB) - getSortTime(a, statusA);
+      });
+
+      setRecords(sortedList);
+      setTotal(totalCount);
+    } catch (err) {
+      console.error('获取维修记录失败', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handlePageChange = (newPage) => {
+    setPage(newPage);
+    fetchRecords(newPage);
+  };
+
+  const fetchOptions = async () => {
+    try {
+      const [productRes, optionsRes] = await Promise.all([
+        api.get(`/product-data/options`),
+        api.get(`/options/all`)
+      ]);
+      setOptions(prev => ({
+        brands: productRes.data?.brands || [],
+        models: productRes.data?.models || [],
+        types: productRes.data?.types || [],
+        colors: productRes.data?.colors || [],
+        specs: productRes.data?.specs || [],
+        platforms: optionsRes.data?.platforms || [],
+        warehouses: optionsRes.data?.warehouses || [],
+        reasons: optionsRes.data?.reasons || [],
+        statuses: optionsRes.data?.statuses || [],
+        couriers: optionsRes.data?.couriers || [],
+        battery_requires: optionsRes.data?.battery_requires || [],
+        repair_platforms: optionsRes.data?.repair_platforms || [],
+        return_reasons: optionsRes.data?.return_reasons || []
+      }));
+    } catch (err) {
+      console.error('获取选项失败', err);
+      setOptions({
+        brands: [],
+        models: [],
+        types: [],
+        colors: [],
+        specs: [],
+        platforms: [],
+        warehouses: [],
+        reasons: [],
+        statuses: [],
+        couriers: [],
+        battery_requires: [],
+        repair_platforms: [],
+        return_reasons: []
+      });
+    }
+  };
+
+  const fetchProvinces = async () => {
+    try {
+      const res = await api.get(`/districts`);
+      if (res.data.status === '1' && res.data.districts) {
+        setAddressOptions(prev => ({ ...prev, provinces: res.data.districts }));
+      }
+    } catch (err) {
+      console.error('获取省份失败', err);
+    }
+  };
+
+  const fetchCities = async (adcode) => {
+    try {
+      const res = await api.get(`/districts?adcode=${adcode}`);
+      if (res.data.status === '1' && res.data.districts) {
+        setAddressOptions(prev => ({ ...prev, cities: res.data.districts }));
+      }
+    } catch (err) {
+      console.error('获取城市失败', err);
+    }
+  };
+
+  // 判断是否为直筒子市（不设区县，直接管辖镇街道）
+  const isDirectControlledCity = (items) => {
+    return items.length > 0 && items[0].level === 'street';
+  };
+
+  const fetchDistricts = async (adcode) => {
+    try {
+      const res = await api.get(`/districts?adcode=${adcode}`);
+      if (res.data.status === '1' && res.data.districts) {
+        const items = res.data.districts;
+        // 直筒子市：API返回的是镇街道，直接放到towns
+        if (isDirectControlledCity(items)) {
+          setAddressOptions(prev => ({ ...prev, districts: [], towns: items }));
+        } else {
+          setAddressOptions(prev => ({ ...prev, districts: items, towns: [] }));
+        }
+      }
+    } catch (err) {
+      console.error('获取区县失败', err);
+    }
+  };
+
+  const fetchTowns = async (adcode) => {
+    try {
+      const res = await api.get(`/districts?adcode=${adcode}`);
+      if (res.data.status === '1' && res.data.districts) {
+        setAddressOptions(prev => ({ ...prev, towns: res.data.districts }));
+      }
+    } catch (err) {
+      console.error('获取街道失败', err);
+    }
+  };
+
+  const handleProvinceChange = (e) => {
+    const adcode = e.target.value;
+    const name = e.target.options[e.target.selectedIndex]?.text || '';
+    setFormData(prev => ({ 
+      ...prev, 
+      省份: name, 
+      省份adcode: adcode,
+      城市: '', 城市adcode: '', 
+      区县: '', 区县adcode: '', 
+      镇街道: '', 镇街道adcode: '' 
+    }));
+    setAddressOptions(prev => ({ ...prev, cities: [], districts: [], towns: [] }));
+    if (adcode) {
+      fetchCities(adcode);
+    }
+  };
+
+  const handleCityChange = (e) => {
+    const adcode = e.target.value;
+    const name = e.target.options[e.target.selectedIndex]?.text || '';
+    setFormData(prev => ({ 
+      ...prev, 
+      城市: name, 
+      城市adcode: adcode,
+      区县: '', 区县adcode: '', 
+      镇街道: '', 镇街道adcode: '' 
+    }));
+    setAddressOptions(prev => ({ ...prev, districts: [], towns: [] }));
+    if (adcode) {
+      fetchDistricts(adcode);
+    }
+  };
+
+  const handleDistrictChange = (e) => {
+    const name = e.target.value;
+    const district = addressOptions.districts.find(d => d.name === name);
+    const adcode = district?.adcode || '';
+    setFormData(prev => ({ 
+      ...prev, 
+      区县: name, 
+      区县adcode: adcode,
+      镇街道: '', 镇街道adcode: '' 
+    }));
+    setAddressOptions(prev => ({ ...prev, towns: [] }));
+    if (adcode) {
+      fetchTowns(adcode);
+    }
+  };
+
+  const handleTownChange = (e) => {
+    const name = e.target.value;
+    // 从towns数组中查找对应的adcode
+    const town = addressOptions.towns.find(t => t.name === name);
+    const adcode = town?.adcode || '';
+    setFormData(prev => ({ ...prev, 镇街道: name, 镇街道adcode: adcode }));
+  };
+
+  const loadEditAddressOptions = async (province, provinceAdcode, city, cityAdcode, district, districtAdcode, town, townAdcode) => {
+    try {
+      const provincesRes = await api.get(`/districts`);
+      if (provincesRes.data.status !== '1' || !provincesRes.data.districts) return;
+      
+      const provinces = provincesRes.data.districts;
+      let cities = [];
+      let districts = [];
+      let towns = [];
+      
+      if (provinceAdcode) {
+        const citiesRes = await api.get(`/districts?adcode=${provinceAdcode}`);
+        if (citiesRes.data.status === '1' && citiesRes.data.districts) {
+          cities = citiesRes.data.districts;
+          
+          if (cityAdcode) {
+            const districtsRes = await api.get(`/districts?adcode=${cityAdcode}`);
+            if (districtsRes.data.status === '1' && districtsRes.data.districts) {
+              const items = districtsRes.data.districts;
+              // 直筒子市：API返回的是镇街道，直接放到towns
+              if (isDirectControlledCity(items)) {
+                towns = items;
+                // 直筒子市没有区县，区县字段保持为空
+                district = '';
+                districtAdcode = '';
+              } else {
+                districts = items;
+                
+                if (districtAdcode) {
+                  const townsRes = await api.get(`/districts?adcode=${districtAdcode}`);
+                  if (townsRes.data.status === '1' && townsRes.data.districts) {
+                    towns = townsRes.data.districts;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      
+      // 一次性更新所有地址选项
+      setEditAddressOptions({ provinces, cities, districts, towns });
+      
+      // 一次性更新所有地址字段
+      const provinceName = provinceAdcode ? (provinces.find(p => p.adcode === provinceAdcode)?.name || province) : province;
+      const cityName = cityAdcode ? (cities.find(c => c.adcode === cityAdcode)?.name || city) : city;
+      const districtName = districtAdcode ? (districts.find(d => d.adcode === districtAdcode)?.name || district) : district;
+      // 对于直筒子市，优先使用传入的镇名字，因为所有镇的adcode相同
+      const townName = town || (townAdcode ? (towns.find(t => t.adcode === townAdcode)?.name || '') : '');
+      
+      setEditFormData(prev => ({
+        ...prev,
+        省份: provinceName,
+        省份adcode: provinceAdcode,
+        城市: cityName,
+        城市adcode: cityAdcode,
+        区县: districtName,
+        区县adcode: districtAdcode,
+        镇街道: townName,
+        镇街道adcode: townAdcode
+      }));
+    } catch (err) {
+      console.error('加载地址失败', err);
+    }
+  };
+
+  const handleEditProvinceChange = (e) => {
+    const adcode = e.target.value;
+    const name = e.target.options[e.target.selectedIndex]?.text || '';
+    setEditFormData(prev => ({ 
+      ...prev, 
+      省份: name, 
+      省份adcode: adcode,
+      城市: '', 城市adcode: '', 
+      区县: '', 区县adcode: '', 
+      镇街道: '', 镇街道adcode: '' 
+    }));
+    setEditAddressOptions(prev => ({ ...prev, cities: [], districts: [], towns: [] }));
+    if (adcode) {
+      api.get(`/districts?adcode=${adcode}`).then(res => {
+        if (res.data.status === '1' && res.data.districts) {
+          setEditAddressOptions(prev => ({ ...prev, cities: res.data.districts }));
+        }
+      });
+    }
+  };
+
+  const handleEditCityChange = (e) => {
+    const adcode = e.target.value;
+    const name = e.target.options[e.target.selectedIndex]?.text || '';
+    setEditFormData(prev => ({ 
+      ...prev, 
+      城市: name, 
+      城市adcode: adcode,
+      区县: '', 区县adcode: '', 
+      镇街道: '', 镇街道adcode: '' 
+    }));
+    setEditAddressOptions(prev => ({ ...prev, districts: [], towns: [] }));
+    if (adcode) {
+      api.get(`/districts?adcode=${adcode}`).then(res => {
+        if (res.data.status === '1' && res.data.districts) {
+          const items = res.data.districts;
+          // 直筒子市：API返回的是镇街道，直接放到towns
+          if (isDirectControlledCity(items)) {
+            setEditAddressOptions(prev => ({ ...prev, districts: [], towns: items }));
+          } else {
+            setEditAddressOptions(prev => ({ ...prev, districts: items }));
+          }
+        }
+      });
+    }
+  };
+
+  const handleEditDistrictChange = (e) => {
+    const name = e.target.value;
+    const district = editAddressOptions.districts.find(d => d.name === name);
+    const adcode = district?.adcode || '';
+    setEditFormData(prev => ({ 
+      ...prev, 
+      区县: name, 
+      区县adcode: adcode,
+      镇街道: '', 镇街道adcode: '' 
+    }));
+    setEditAddressOptions(prev => ({ ...prev, towns: [] }));
+    if (adcode) {
+      api.get(`/districts?adcode=${adcode}`).then(res => {
+        if (res.data.status === '1' && res.data.districts) {
+          setEditAddressOptions(prev => ({ ...prev, towns: res.data.districts }));
+        }
+      });
+    }
+  };
+
+  const handleEditTownChange = (e) => {
+    const name = e.target.value;
+    const town = editAddressOptions.towns.find(t => t.name === name);
+    const adcode = town?.adcode || '';
+    setEditFormData(prev => ({ ...prev, 镇街道: name, 镇街道adcode: adcode }));
+  };
+
+  useEffect(() => {
+    fetchRecords();
+    fetchOptions();
+    fetchProvinces();
+  }, []);
+
+  useEffect(() => {
+    if (isMobile) {
+      setTimeout(() => applyTableLabels(), 100);
+    }
+  }, [isMobile, records]);
+
+  const filteredRecords = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return records;
+    return records.filter((r) => {
+      const hay = [
+        r.维修单号, r.省份, r.城市, r.区县, r.详细地址,
+        r.联系人, r.联系电话, r.品牌, r.型号, r.类型, r.颜色,
+        r.购买日期, r.购买平台, r.订单编号, r.故障描述,
+        r.登记人, r.状态, r.报修平台
+      ].filter(Boolean).join(' ').toLowerCase();
+      return hay.includes(q);
+    });
+  }, [records, search]);
+
+  const fetchCascadeOptions = async (field, value, latestFormData) => {
+    const { 品牌, 型号, 类型, 颜色 } = latestFormData || formData;
+    
+    try {
+      if (field === '品牌' && value) {
+        const res = await api.get(`/product-data/models?brand=${encodeURIComponent(value)}`);
+        setOptions(prev => ({ ...prev, models: res.data.models || [] }));
+        setFormData(prev => ({ ...prev, 型号: '', 类型: '', 颜色: '' }));
+      } else if (field === '型号' && 品牌 && value) {
+        const res = await api.get(`/product-data/types?brand=${encodeURIComponent(品牌)}&model=${encodeURIComponent(value)}`);
+        setOptions(prev => ({ ...prev, types: res.data.types || [] }));
+        setFormData(prev => ({ ...prev, 类型: '', 颜色: '' }));
+      } else if (field === '类型' && 品牌 && 型号 && value) {
+        const res = await api.get(`/product-data/colors?brand=${encodeURIComponent(品牌)}&model=${encodeURIComponent(型号)}&type=${encodeURIComponent(value)}`);
+        setOptions(prev => ({ ...prev, colors: res.data.colors || [] }));
+        setFormData(prev => ({ ...prev, 颜色: '' }));
+      } else if (field === '颜色' && 品牌 && 型号 && 类型 && value) {
+        const res = await api.get(`/product-data/specs?brand=${encodeURIComponent(品牌)}&model=${encodeURIComponent(型号)}&type=${encodeURIComponent(类型)}&color=${encodeURIComponent(value)}`);
+        setOptions(prev => ({ ...prev, specs: res.data.specs || [] }));
+      }
+    } catch (err) {
+      console.error('获取级联选项失败', err);
+    }
+  };
+
+  const handleFormChange = (field, value) => {
+    // 限制联系电话只能输入数字，且最多 11 位
+    if (field === '联系电话') {
+      const numericValue = value.replace(/\D/g, '').slice(0, 11);
+      value = numericValue;
+    }
+    
+    const latest = { ...formData, [field]: value };
+    
+    setFormData(prev => {
+      let d = { ...prev, [field]: value };
+      if (field === '品牌') d = { ...d, 型号: '', 类型: '', 颜色: '' };
+      else if (field === '型号') d = { ...d, 类型: '', 颜色: '' };
+      else if (field === '类型') d = { ...d, 颜色: '' };
+      return d;
+    });
+    
+    if (field === '品牌') setOptions(prev => ({ ...prev, models: [], types: [], colors: [] }));
+    else if (field === '型号') setOptions(prev => ({ ...prev, types: [], colors: [] }));
+    else if (field === '类型') setOptions(prev => ({ ...prev, colors: [] }));
+    
+    if (value) setErrors(prev => ({ ...prev, [field]: '' }));
+    fetchCascadeOptions(field, value, latest);
+    if (field === '返厂快递' || field === '返厂单号') {
+      if (courierCheckTimer.current) clearTimeout(courierCheckTimer.current);
+      courierCheckTimer.current = setTimeout(() => {
+        checkCourierDuplicate(latest.返厂快递, latest.返厂单号);
+      }, 400);
+    }
+    if (field === '购买日期') {
+      const warrantyStatus = calculateWarrantyStatus(value);
+      setFormData(prev => ({ ...prev, 保修状态: warrantyStatus }));
+    }
+  };
+
+  const checkCourierDuplicate = async (快递, 单号) => {
+    if (!快递 || !单号) {
+      setCourierError('');
+      return { exists: false };
+    }
+    try {
+      const res = await api.get(
+        `/maintenance/check-courier?返厂快递=${encodeURIComponent(快递)}&返厂单号=${encodeURIComponent(单号)}`
+      );
+      if (res.data.exists) {
+        setCourierError(`该返厂快递单号已被 ${res.data.登记人 || '其他用户'} 登记（维修单号 ${res.data.维修单号}），请勿重复登记`);
+      } else {
+        setCourierError('');
+      }
+      return { exists: !!res.data.exists };
+    } catch (error) {
+      console.error('返厂快递查重失败:', error);
+      return { exists: false };
+    }
+  };
+
+  const calculateWarrantyStatus = (purchaseDate) => {
+    if (!purchaseDate) return '已过质保期';
+    const purchase = new Date(purchaseDate);
+    const now = new Date();
+    const diffTime = now - purchase;
+    const diffDays = diffTime / (1000 * 60 * 60 * 24);
+    if (diffDays > 365) {
+      return '已过质保期';
+    } else {
+      return '未过质保期';
+    }
+  };
+
+  /** 解析粘贴文本，自动填充表单 */
+  const handleSmartPaste = async (text) => {
+    if (!text || typeof text !== 'string') return;
+    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+    const fullText = text.trim();
+
+    // 收集所有字段变更，最后一次性 setFormData（避免多次调用 handleFormChange 相互覆盖）
+    const updates = {};
+
+    // 1. 保修状态
+    if (fullText.includes('已过质保期')) updates.保修状态 = '已过质保期';
+    else if (fullText.includes('未过质保期')) updates.保修状态 = '未过质保期';
+
+    // 2. 电池要求（"没有寄回"→"无需寄回"，"寄回"→"寄回"）
+    if (fullText.includes('锂电池是否寄回') || fullText.includes('锂电池是否寄回')) {
+      if (/没有寄回|不寄回/.test(fullText)) {
+        updates.电池要求 = options.battery_requires.find(b => b.includes('无'))
+          || options.battery_requires.find(b => b.includes('不'))
+          || '无需寄回';
+      } else if (/寄回/.test(fullText.replace(/没有寄回|不寄回/, ''))) {
+        updates.电池要求 = options.battery_requires.find(b => b.includes('寄回') && !b.includes('无') && !b.includes('不')) || '寄回';
+      }
+    }
+
+    // 3. 购买平台 / 报修平台
+    if (fullText.includes('淘宝')) {
+      updates.购买平台 = options.platforms.find(p => p.includes('淘宝')) || '淘宝';
+      updates.报修平台 = options.repair_platforms.find(p => p.includes('淘宝')) || '淘宝';
+    }
+
+    // 4. 返厂原因（模糊匹配：优先精确匹配，兜底含"维修"的选项）
+    if (fullText.includes('返厂维修')) {
+      updates.返厂原因 = options.return_reasons.find(r => r.includes('返厂维修'))
+        || options.return_reasons.find(r => r.includes('维修'))
+        || '返厂维修';
+    }
+
+    // 0. 订单编号 — 找"订单号"行后的数字
+    for (let i = 0; i < lines.length; i++) {
+      if (/^订单号/.test(lines[i])) {
+        // 同行："订单号：2535218439857598454"
+        const m = lines[i].match(/(\d{10,})/);
+        if (m) { updates.订单编号 = m[1]; break; }
+        // 下一行
+        if (i + 1 < lines.length) {
+          const m2 = lines[i+1].match(/(\d{10,})/);
+          if (m2) { updates.订单编号 = m2[1]; break; }
+        }
+      }
+    }
+
+    // 5. 品牌/型号/类型/颜色 — 原始值提取（即使级联失败也能填进去）
+    let pBrand = '';
+    let pParts = [];
+    const pVariantIdx = lines.findIndex(l => /款/.test(l) && /-/.test(l));
+    if (pVariantIdx >= 1) {
+      const pBrandLine = lines[pVariantIdx - 1];
+      // 品牌：从已知品牌匹配，兜底取前 2 个中文字
+      const pKnownBrands = [...(options.brands || [])].sort((a, b) => b.length - a.length);
+      for (const b of pKnownBrands) {
+        if (pBrandLine.startsWith(b)) { pBrand = b; break; }
+      }
+      if (!pBrand) for (const b of pKnownBrands) { if (pBrandLine.includes(b)) { pBrand = b; break; } }
+      if (!pBrand) { const m = pBrandLine.match(/^([\u4e00-\u9fa5]{2})/); if (m) pBrand = m[1]; }
+      // 反向匹配：提取值在已知品牌中找到包含它的（如 "船夫" → "BOATMAN/船夫"）
+      if (pBrand) {
+        const fullBrand = pKnownBrands.find(b => b.includes(pBrand));
+        if (fullBrand) pBrand = fullBrand;
+        updates.品牌 = pBrand;
+      }
+
+      const pVariantLine = lines[pVariantIdx];
+      pParts = pVariantLine.split('-');
+      if (pParts[0]) updates.型号 = pParts[0];
+      if (pParts[1]) updates.类型 = pParts[1];
+      if (pParts[2]) updates.颜色 = pParts[2].split('【')[0].split('[')[0];
+    }
+
+    // 6. 联系电话（11 位手机号）
+    const phoneMatch = fullText.match(/1[3-9]\d{9}/);
+    if (phoneMatch) updates.联系电话 = phoneMatch[0];
+
+    // 6. 联系人 — "收货信息"下，电话号码前面的文字
+    const receiveIdx = lines.findIndex(l => l.includes('收货信息'));
+    if (receiveIdx >= 0) {
+      for (let i = receiveIdx + 1; i < lines.length; i++) {
+        const line = lines[i];
+        const phoneInLine = line.match(/(1[3-9]\d{9})/);
+        if (phoneInLine) {
+          // 电话号码前面有文字 → "张三 13800138000"
+          const beforePhone = line.slice(0, phoneInLine.index).trim();
+          if (beforePhone) {
+            updates.联系人 = beforePhone;
+          } else if (i > receiveIdx + 1) {
+            // 电话单独一行，上一行是姓名
+            updates.联系人 = lines[i - 1];
+          }
+          break;
+        }
+      }
+      // 没找到电话行，用原来的逻辑兜底
+      if (!updates.联系人) {
+        for (let i = receiveIdx + 1; i < lines.length; i++) {
+          const line = lines[i];
+          if (line.length >= 2 && line.length <= 10 && !/\d/.test(line) &&
+              !line.includes('省') && !line.includes('市') && !line.includes('售后') &&
+              !line.includes('故障') && !line.includes('方式')) {
+            updates.联系人 = line;
+            break;
+          }
+        }
+      }
+    }
+
+    // 7. 故障描述 — 只取"故障描述"后面的连续描述文字，遇到下一个标题或空行停止
+    const faultIdx = lines.findIndex(l => l.includes('故障描述'));
+    if (faultIdx >= 0 && faultIdx + 1 < lines.length) {
+      const sectionEndKeywords = ['寄回', '快递', '面单', '条码', '电池', '平台', '返厂', '售后', '订单号', '收货信息', '故障描述'];
+      const faultLines = [];
+      for (let i = faultIdx + 1; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line) break; // 空行停止
+        if (sectionEndKeywords.some(k => line.includes(k)) && line.length < 15) break; // 短行标题停止
+        faultLines.push(line);
+      }
+      const faultText = faultLines.join('，');
+      if (faultText) updates.故障描述 = faultText;
+    }
+
+    // 8. 地址解析（从左到右逐级剥离，避免正则交叉匹配）
+    const addrLine = lines.find(l => /省/.test(l) && /市/.test(l) || /^(北京|上海|天津|重庆)/.test(l));
+    if (addrLine) {
+      let rest = addrLine;
+      let provinceName = '', cityName = '', districtName = '', townName = '';
+
+      // 省/自治区/直辖市
+      const pMatch = rest.match(/^([\u4e00-\u9fa5]+?(?:省|自治区|市))/);
+      if (pMatch) { provinceName = pMatch[1]; rest = rest.slice(provinceName.length); }
+
+      // 市/州/盟（非直辖市跳过）
+      const cMatch = rest.match(/^([\u4e00-\u9fa5]+?(?:市|州|盟))/);
+      if (cMatch) { cityName = cMatch[1]; rest = rest.slice(cityName.length); }
+
+      // 区/县/市/旗
+      const dMatch = rest.match(/^([\u4e00-\u9fa5]+?(?:区|县|市|旗))/);
+      if (dMatch) { districtName = dMatch[1]; rest = rest.slice(districtName.length); }
+
+      // 镇/街道/乡
+      const tMatch = rest.match(/^([\u4e00-\u9fa5]+?(?:镇|街道|乡))/);
+      if (tMatch) { townName = tMatch[1]; rest = rest.slice(townName.length); }
+
+      // 地址值立即加入 updates（API 级联找到更准确的再覆盖）
+      if (provinceName) updates.省份 = provinceName;
+      if (cityName) updates.城市 = cityName;
+      if (districtName) updates.区县 = districtName;
+      if (townName) {
+        updates.镇街道 = townName;
+        // 将镇街道加入选项列表，让 select 能立即显示
+        setAddressOptions(prev => {
+          if (prev.towns.some(t => t.name === townName)) return prev;
+          return { ...prev, towns: [...prev.towns, { name: townName, adcode: '' }] };
+        });
+      }
+
+      // 详细地址 — 地址行后面非标签行
+      const addrIdx = lines.findIndex(l => l === addrLine);
+      if (addrIdx >= 0 && addrIdx + 1 < lines.length) {
+        const next = lines[addrIdx + 1];
+        if (!next.includes('售后') && !next.includes('故障') && !next.includes('方式') && next !== '返厂维修') {
+          updates.详细地址 = next;
+        }
+      }
+
+      // 先批量应用非地址字段
+      setFormData(prev => ({ ...prev, ...updates }));
+      setSmartPasteText('');
+      // 地址级联是异步的，单独走
+      if (provinceName || cityName || districtName || townName) {
+        await smartParseAddress(provinceName, cityName, districtName, townName);
+      }
+    } else {
+      // 没有地址行，直接应用全部变更
+      setFormData(prev => ({ ...prev, ...updates }));
+      setSmartPasteText('');
+    }
+
+    // 品牌→型号→类型→颜色 级联填充
+    const parsedProduct = {};
+    if (pBrand) parsedProduct.品牌 = pBrand;
+    if (pParts?.[0]) parsedProduct.型号 = pParts[0];
+    if (pParts?.[1]) parsedProduct.类型 = pParts[1];
+    if (pParts?.[2]) parsedProduct.颜色 = pParts[2].split('【')[0].split('[')[0];
+    await cascadeProductFields(lines, parsedProduct);
+
+    alert('智能识别完成！请检查并补充剩余字段。');
+  };
+
+  /** 级联填充省市区地址 */
+  const smartParseAddress = async (provinceName, cityName, districtName, townName) => {
+    // 去除行政后缀后双向匹配
+    const matchName = (parsed, apiName) => {
+      const clean = (s) => s.replace(/[省自治区市州盟区县市旗镇街道乡]/g, '');
+      const p = clean(parsed);
+      const a = clean(apiName);
+      return p.includes(a) || a.includes(p);
+    };
+
+    try {
+      const provRes = await api.get('/districts');
+      if (provRes.data.status !== '1') return;
+      const provinces = provRes.data.districts;
+
+      const province = provinces.find(p => matchName(provinceName, p.name));
+      if (!province) return;
+      setFormData(prev => ({ ...prev, 省份: province.name, 省份adcode: province.adcode }));
+      setAddressOptions(prev => ({ ...prev, provinces }));
+      await new Promise(r => setTimeout(r, 300));
+
+      if (!cityName) return;
+      const cityRes = await api.get(`/districts?adcode=${province.adcode}`);
+      if (cityRes.data.status !== '1') return;
+      const cities = cityRes.data.districts;
+      const city = cities.find(c => matchName(cityName, c.name));
+      if (!city) return;
+      setFormData(prev => ({ ...prev, 城市: city.name, 城市adcode: city.adcode }));
+      setAddressOptions(prev => ({ ...prev, cities }));
+      await new Promise(r => setTimeout(r, 300));
+
+      if (!districtName) return;
+      const distRes = await api.get(`/districts?adcode=${city.adcode}`);
+      if (distRes.data.status !== '1') return;
+      const items = distRes.data.districts;
+
+      // 直筒子市（无区县）
+      if (items.length > 0 && items[0].level === 'street') {
+        const town = items.find(t => matchName(districtName, t.name));
+        if (town) {
+          setFormData(prev => ({ ...prev, 区县: '', 区县adcode: '', 镇街道: town.name, 镇街道adcode: town.adcode }));
+          setAddressOptions(prev => ({ ...prev, districts: [], towns: items }));
+        }
+        return;
+      }
+
+      const district = items.find(d => matchName(districtName, d.name));
+      if (!district) return;
+      setFormData(prev => ({ ...prev, 区县: district.name, 区县adcode: district.adcode }));
+      setAddressOptions(prev => ({ ...prev, districts: items }));
+      await new Promise(r => setTimeout(r, 300));
+
+      if (!townName) return;
+      const townRes = await api.get(`/districts?adcode=${district.adcode}`);
+      if (townRes.data.status !== '1') return;
+      const towns = townRes.data.districts;
+      const town = towns.find(t => matchName(townName, t.name));
+      if (town) {
+        setFormData(prev => ({ ...prev, 镇街道: town.name, 镇街道adcode: town.adcode }));
+        setAddressOptions(prev => ({ ...prev, towns }));
+      }
+    } catch (err) {
+      console.error('地址智能解析失败:', err);
+    }
+  };
+
+  /** 智能粘贴：品牌→型号→类型→颜色 级联填充 */
+  const cascadeProductFields = async (lines, parsed = {}) => {
+    // 1. 先找变体行（"2025款汉-高配版-碳纤色..."），取上一行作为品牌行
+    const variantIdx = lines.findIndex(l => /款/.test(l) && /-/.test(l));
+    if (variantIdx < 1) return; // 没有变体行，或品牌行不存在
+
+    const brandLine = lines[variantIdx - 1];
+    if (!brandLine) return;
+
+    // 2. 品牌：从品牌行匹配
+    const opts = options;
+    const knownBrands = [...(opts.brands || [])].sort((a, b) => b.length - a.length);
+    let brand = '';
+    for (const b of knownBrands) {
+      if (brandLine.startsWith(b)) { brand = b; break; }
+    }
+    if (!brand) {
+      for (const b of knownBrands) {
+        if (brandLine.includes(b)) { brand = b; break; }
+      }
+    }
+    if (!brand) {
+      const fallbackMatch = brandLine.match(/^([\u4e00-\u9fa5]{2})/);
+      if (fallbackMatch) {
+        brand = fallbackMatch[1];
+        console.log('品牌模糊匹配兜底:', brand);
+      }
+    }
+    // 反向匹配：提取值在已知品牌中找到包含它的（如 "船夫" → "BOATMAN/船夫"）
+    if (brand) {
+      const fullBrand = knownBrands.find(b => b.includes(brand));
+      if (fullBrand) brand = fullBrand;
+    }
+    if (!brand) return;
+
+    // 3. 变体行解析
+    const variantLine = lines[variantIdx];
+    const parts = variantLine.split('-');
+    // parts = ["2025款汉", "高配版", "碳纤色【2电】[定位定距 探测深度80米]"]
+
+    // 先设品牌，不清已解析的级联字段
+    setFormData(prev => {
+      const update = { 品牌: brand };
+      if (!parsed.型号) update.型号 = '';
+      if (!parsed.类型) update.类型 = '';
+      if (!parsed.颜色) update.颜色 = '';
+      return { ...prev, ...update };
+    });
+    setOptions(prev => {
+      const o = { models: [], types: [], colors: [] };
+      if (parsed.类型) o.types = [parsed.类型];
+      if (parsed.颜色) o.colors = [parsed.颜色];
+      return { ...prev, ...o };
+    });
+
+    try {
+      // === 品牌 → 型号 ===
+      await new Promise(r => setTimeout(r, 300));
+      const modelRes = await api.get(`/product-data/models?brand=${encodeURIComponent(brand)}`);
+      let models = modelRes.data.models || [];
+      const parsedModel = parts[0] || '';
+      // 确保解析到的型号在选项列表中（不在就添加，让 select 能显示）
+      if (parsedModel && !models.find(m => parsedModel.includes(m) || m.includes(parsedModel))) {
+        models = [parsedModel, ...models];
+      }
+      setOptions(prev => ({ ...prev, models }));
+
+      const matchedModel = models.find(m => parsedModel.includes(m) || m.includes(parsedModel)) || parsedModel;
+      if (!matchedModel) return;
+
+      setFormData(prev => {
+        const update = { 型号: matchedModel };
+        if (!parsed.类型) update.类型 = '';
+        if (!parsed.颜色) update.颜色 = '';
+        return { ...prev, ...update };
+      });
+      setOptions(prev => {
+        const o = { types: [], colors: [] };
+        if (parsed.颜色) o.colors = [parsed.颜色];
+        return { ...prev, ...o };
+      });
+
+      if (parts.length < 2) return;
+
+      // === 型号 → 类型 ===
+      await new Promise(r => setTimeout(r, 300));
+      const typeRes = await api.get(`/product-data/types?brand=${encodeURIComponent(brand)}&model=${encodeURIComponent(matchedModel)}`);
+      let types = typeRes.data.types || [];
+      const parsedType = parts[1] || '';
+      if (parsedType && !types.find(t => parsedType.includes(t) || t.includes(parsedType))) {
+        types = [parsedType, ...types];
+      }
+      setOptions(prev => ({ ...prev, types }));
+
+      const matchedType = types.find(t => parsedType.includes(t) || t.includes(parsedType)) || parsedType;
+      if (!matchedType) return;
+
+      setFormData(prev => {
+        const update = { 类型: matchedType };
+        if (!parsed.颜色) update.颜色 = '';
+        return { ...prev, ...update };
+      });
+      setOptions(prev => {
+        const o = { colors: [] };
+        if (parsed.颜色) o.colors = [parsed.颜色];
+        return { ...prev, ...o };
+      });
+
+      if (parts.length < 3) return;
+
+      // === 类型 → 颜色 ===
+      await new Promise(r => setTimeout(r, 300));
+      const colorRes = await api.get(`/product-data/colors?brand=${encodeURIComponent(brand)}&model=${encodeURIComponent(matchedModel)}&type=${encodeURIComponent(matchedType)}`);
+      let colors = colorRes.data.colors || [];
+      // 去掉"【2电】[定位定距...]"等后缀
+      const parsedColor = (parts[2] || '').split('【')[0].split('[')[0];
+      if (parsedColor && !colors.find(c => parsedColor.includes(c) || c.includes(parsedColor))) {
+        colors = [parsedColor, ...colors];
+      }
+      setOptions(prev => ({ ...prev, colors }));
+
+      const matchedColor = colors.find(c => parsedColor.includes(c) || c.includes(parsedColor)) || parsedColor;
+      if (matchedColor) {
+        setFormData(prev => ({ ...prev, 颜色: matchedColor }));
+      }
+    } catch (err) {
+      console.error('智能识别产品级联失败:', err);
+    }
+  };
+
+  const openAddForm = () => {
+    const newNo = generateMaintenanceNo();
+    const userName = user?.name || localStorage.getItem('userName') || '未登录';
+    setFormData({
+      维修单号: newNo,
+      省份: '', 省份adcode: '', 城市: '', 城市adcode: '', 区县: '', 区县adcode: '', 镇街道: '', 镇街道adcode: '', 详细地址: '',
+      联系人: '', 联系电话: '',
+      品牌: '', 型号: '', 类型: '', 颜色: '',
+      电池要求: '', 购买日期: '', 购买平台: '',
+       订单编号: '', 保修状态: '已过质保期', 返厂原因: '', 故障描述: '',
+      返厂快递: '', 返厂单号: '', 寄回快递: '', 寄回单号: '',
+      登记人: userName, 状态: '待处理', 报修平台: ''
+    });
+    setErrors({});
+    setCourierError('');
+    setSmartPasteText('');
+    setShowForm(true);
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    const requiredFields = ['品牌', '型号', '类型', '颜色', '购买平台', '联系人', '联系电话', '电池要求', '报修平台', '省份', '城市', '镇街道', '详细地址', '返厂原因', '返厂快递', '返厂单号'];
+    const newErrors = {};
+    let hasError = false;
+    requiredFields.forEach(field => {
+      const value = formData[field];
+      if (!value || (typeof value === 'string' && value.trim() === '')) {
+        newErrors[field] = `${field}为必填项`;
+        hasError = true;
+      }
+    });
+    
+    // 验证联系电话格式（11 位数字）
+    if (formData.联系电话 && !/^\d{11}$/.test(formData.联系电话)) {
+      newErrors['联系电话'] = '联系电话必须是 11 位数字';
+      hasError = true;
+    }
+    
+    // 验证订单编号：购买平台不是"其它渠道"时必填
+    if (formData.购买平台 && formData.购买平台 !== '其它渠道') {
+      if (!formData.订单编号 || formData.订单编号.trim() === '') {
+        newErrors['订单编号'] = '订单编号为必填项';
+        hasError = true;
+      }
+    }
+    
+    // 验证区县：如果有区县选项则必填，没有则非必填
+    if (addressOptions.districts.length > 0) {
+      if (!formData.区县 || formData.区县.trim() === '') {
+        newErrors['区县'] = '区县为必填项';
+        hasError = true;
+      }
+    }
+    
+    if (hasError) {
+      setErrors(newErrors);
+      alert('请填写所有必填项');
+      return;
+    }
+    const dup = await checkCourierDuplicate(formData.返厂快递, formData.返厂单号);
+    if (dup.exists) {
+      alert('该返厂快递单号已登记过，请勿重复登记');
+      return;
+    }
+    try {
+      const res = await api.post(`/maintenance`, formData);
+      const maintenanceId = res.data.维修单号;
+      const barcodePhotoCount = barcodeFiles.length;
+      if (selectedFiles.length > 0) {
+        await uploadAttachments(maintenanceId);
+        await fetchAttachments(maintenanceId);
+      }
+      if (barcodePhotoCount > 0) {
+        await uploadBarcodePhotos(maintenanceId);
+        await fetchAttachments(maintenanceId);
+      }
+      setSuccessRecord({ ...formData, barcodePhotoCount });
+      setShowSuccessModal(true);
+      setShowForm(false);
+      setSelectedFiles([]);
+      setFilePreviews([]);
+      setBarcodeFiles([]);
+      setBarcodeFilePreviews([]);
+      setPage(1);
+      fetchRecords(1);
+    } catch (e) {
+      console.error('保存记录失败', e);
+      alert('保存失败: ' + (e.response?.data?.error || e.message));
+    }
+  };
+
+  const handlePreSave = async () => {
+    try {
+      const res = await api.post(`/maintenance`, { ...formData, 状态: '预登记' });
+      const maintenanceId = res.data.维修单号;
+      if (selectedFiles.length > 0) {
+        await uploadAttachments(maintenanceId);
+      }
+      if (barcodeFiles.length > 0) {
+        await uploadBarcodePhotos(maintenanceId);
+      }
+      alert(`预登记已保存（维修单号 ${maintenanceId}），可在列表中继续完善后提交登记`);
+      setShowForm(false);
+      setSelectedFiles([]);
+      setFilePreviews([]);
+      setBarcodeFiles([]);
+      setBarcodeFilePreviews([]);
+      setPage(1);
+      fetchRecords(1);
+    } catch (e) {
+      console.error('预登记保存失败', e);
+      alert('预登记保存失败: ' + (e.response?.data?.error || e.message));
+    }
+  };
+
+  /** 上传容器粘贴处理：从 clipboard 提取文件 */
+  const handleContainerPaste = async (e, onFile) => {
+    // 方案1：从 paste event 的 items 中提取文件（浏览器 + Electron）
+    const items = e.clipboardData?.items || e.clipboardData?.files || [];
+    for (const item of items) {
+      if (item.kind === 'file') {
+        const blob = item.getAsFile ? item.getAsFile() : item;
+        if (blob) {
+          e.preventDefault();
+          const origName = blob.name || `pasted-file-${Date.now()}`;
+          const file = new File([blob], origName, { type: blob.type || 'application/octet-stream' });
+          onFile(file);
+          return true;
+        }
+      }
+    }
+    // 方案2：浏览器 Clipboard API（支持从系统剪贴板读取图片）
+    if (navigator.clipboard?.read && !window.electronClipboard) {
+      try {
+        const clipboardItems = await navigator.clipboard.read();
+        for (const clipItem of clipboardItems) {
+          for (const type of clipItem.types) {
+            if (type.startsWith('image/')) {
+              const blob = await clipItem.getType(type);
+              if (blob) {
+                const file = new File([blob], `pasted-image-${Date.now()}.png`, { type: blob.type || 'image/png' });
+                onFile(file);
+                return true;
+              }
+            }
+          }
+        }
+      } catch (err) {
+        // 用户未授权或无权限
+      }
+    }
+    // 方案3：Electron 原生剪贴板 API 读取（用于部分 Electron 场景）
+    if (window.electronClipboard?.readImage) {
+      try {
+        const dataUrl = await window.electronClipboard.readImage();
+        if (dataUrl) {
+          e.preventDefault();
+          const blob = await (await fetch(dataUrl)).blob();
+          const file = new File([blob], `pasted-image-${Date.now()}.png`, { type: 'image/png' });
+          onFile(file);
+          return true;
+        }
+      } catch (err) {
+        console.warn('Electron clipboard readImage failed:', err);
+      }
+    }
+    return false;
+  };
+
+  const handleFileChange = (e) => {
+    const newFiles = Array.from(e.target.files);
+    const allFiles = [...selectedFiles, ...newFiles];
+    setSelectedFiles(allFiles);
+    
+    const previews = newFiles.map(file => {
+      const fileType = file.type || '';
+      const isImage = fileType.startsWith('image/');
+      const isVideo = fileType.startsWith('video/');
+      return {
+        file,
+        preview: isImage || isVideo ? URL.createObjectURL(file) : null,
+        name: file.name,
+        type: fileType
+      };
+    });
+    setFilePreviews([...filePreviews, ...previews]);
+  };
+
+  const handleBarcodeFileChange = (e) => {
+    const newFiles = Array.from(e.target.files);
+    const allFiles = [...barcodeFiles, ...newFiles];
+    setBarcodeFiles(allFiles);
+    
+    const previews = newFiles.map(file => {
+      const fileType = file.type || '';
+      const isImage = fileType.startsWith('image/');
+      return {
+        file,
+        preview: isImage ? URL.createObjectURL(file) : null,
+        name: file.name,
+        type: fileType
+      };
+    });
+    setBarcodeFilePreviews([...barcodeFilePreviews, ...previews]);
+  };
+
+  const uploadAttachments = async (maintenanceId) => {
+    for (const file of selectedFiles) {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('maintenance_id', maintenanceId);
+      formData.append('status', 'approved');
+      try {
+        await api.post(`/maintenance/${maintenanceId}/attachments`, formData);
+      } catch (error) {
+        console.error('文件上传失败:', error);
+      }
+    }
+  };
+
+  const uploadBarcodePhotos = async (maintenanceId) => {
+    for (const file of barcodeFiles) {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('maintenance_id', maintenanceId);
+      formData.append('file_type', 'barcode_photo');
+      formData.append('status', 'approved');
+      try {
+        await api.post(`/maintenance/${maintenanceId}/attachments`, formData);
+      } catch (error) {
+        console.error('设备条码照片上传失败:', error);
+      }
+    }
+  };
+
+  const fetchAttachments = async (maintenanceId) => {
+    try {
+      const res = await api.get(`/maintenance/${maintenanceId}/attachments`);
+      const data = res.data.attachments || res.data;
+      setAttachments(prev => ({ ...prev, [maintenanceId]: Array.isArray(data) ? data : [] }));
+    } catch (error) {
+      console.error('获取附件失败:', error);
+      setAttachments(prev => ({ ...prev, [maintenanceId]: [] }));
+    }
+  };
+
+  const handleDeleteAttachment = async (maintenanceId, attachmentId) => {
+    try {
+      await api.delete(`/maintenance/attachments/${attachmentId}`);
+      setAttachments(prev => ({
+        ...prev,
+        [maintenanceId]: prev[maintenanceId].filter(a => a.id !== attachmentId)
+      }));
+    } catch (error) {
+      console.error('删除附件失败:', error);
+    }
+  };
+
+  const openPaymentModal = (record) => {
+    setCurrentPaymentRecord(record);
+    setPaymentStatus('已支付');
+    setPaymentImage(null);
+    setPaymentImagePreview(record.支付凭证图片 ? getImageUrl(record.支付凭证图片) : null);
+    setShowPaymentModal(true);
+  };
+
+  const handlePaymentImageChange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      setPaymentImage(file);
+      setPaymentImagePreview(URL.createObjectURL(file));
+    }
+  };
+
+  const handlePaymentSubmit = async () => {
+    if (!currentPaymentRecord) return;
+    
+    const formData = new FormData();
+    formData.append('payment_status', paymentStatus);
+    if (paymentImage) {
+      formData.append('file', paymentImage);
+    }
+    
+    try {
+      await api.post(`/maintenance/${currentPaymentRecord.维修单号}/payment`, formData);
+      
+      setPaymentProof(prev => ({
+        ...prev,
+        [currentPaymentRecord.维修单号]: {
+          status: paymentStatus,
+          image: paymentImage ? paymentImagePreview : (currentPaymentRecord.支付凭证图片 ? getImageUrl(currentPaymentRecord.支付凭证图片) : null)
+        }
+      }));
+      
+      setShowPaymentModal(false);
+      setPage(1);
+      fetchRecords(1);
+    } catch (error) {
+      console.error('提交支付凭证失败:', error);
+      alert('提交失败');
+    }
+  };
+
+  const fetchChangeHistory = async (maintenanceId) => {
+    try {
+      const res = await api.get(`/maintenance/${maintenanceId}/change-requests`);
+      const data = res.data.changeRequests || res.data;
+      setChangeHistory(prev => ({ ...prev, [maintenanceId]: Array.isArray(data) ? data : [] }));
+    } catch (error) {
+      console.error('获取修改历史失败:', error);
+      setChangeHistory(prev => ({ ...prev, [maintenanceId]: [] }));
+    }
+  };
+
+  const toggleRow = (id) => {
+    setExpandedRows(prev => {
+      const newState = { ...prev, [id]: !prev[id] };
+      if (newState[id]) {
+        fetchAttachments(id);
+        if (!changeHistory[id]) {
+          fetchChangeHistory(id);
+        }
+      }
+      return newState;
+    });
+  };
+
+  // 获取展开行的动画样式
+  const getExpandedRowStyle = (isExpanded) => {
+    if (!isExpanded) {
+      return {
+        display: 'none'
+      };
+    }
+    return {
+      background: '#f9f9f9',
+      animation: 'expandFadeIn 0.3s ease-in-out'
+    };
+  };
+
+  // 展开详细内容（桌面端和移动端共用）
+  const renderDetailContent = (rec, isMobileView) => {
+    const flexDir = isMobileView ? 'column' : 'row';
+    return (
+      <>
+        <div style={{ display: 'flex', gap: '12px', fontSize: '13px', flexDirection: flexDir }}>
+          <div style={{ flex: '1 1 auto', minWidth: 0 }}>
+            <div style={{ fontWeight: 'bold', marginBottom: '6px', color: '#1976d2', fontSize: '14px' }}>客户信息</div>
+            <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '70px' }}><strong>购买平台：</strong></span>{rec.购买平台 || '-'}</div>
+            <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '70px' }}><strong>订单编号：</strong></span>{rec.订单编号 || '-'}</div>
+            <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '70px' }}><strong>收件地址：</strong></span>{[rec.省份, rec.城市, rec.区县, rec.镇街道, rec.详细地址].filter(Boolean).join(' ') || '-'}</div>
+            <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '70px' }}><strong>收件人：</strong></span>{rec.联系人 || '-'}</div>
+            <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '70px' }}><strong>联系电话：</strong></span>{rec.联系电话 || '-'}</div>
+            <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '70px' }}><strong>报修平台：</strong></span>{rec.报修平台 || '-'}</div>
+          </div>
+          <div style={{ flex: '1 1 auto', minWidth: 0 }}>
+            <div style={{ fontWeight: 'bold', marginBottom: '6px', color: '#1976d2', fontSize: '14px' }}>设备信息</div>
+            <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>购买日期：</strong></span>{rec.购买日期 ? rec.购买日期.split('T')[0] : '-'}</div>
+            <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>设备品牌：</strong></span>{rec.品牌 || '-'}</div>
+            <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>设备型号：</strong></span>{rec.型号 || '-'}</div>
+            <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>设备类型：</strong></span>{rec.类型 || '-'}</div>
+            <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>设备颜色：</strong></span>{rec.颜色 || '-'}</div>
+            <div>
+              <span style={{ display: 'inline-block', width: '80px' }}><strong>设备条码：</strong></span>
+              {(() => {
+                const barcodePhotos = attachments[rec.维修单号]?.filter(a => a.file_type === 'barcode_photo') || [];
+                if (barcodePhotos.length > 0) {
+                  return (
+                    <span style={{ display: 'inline-flex', gap: '4px', flexWrap: 'wrap', verticalAlign: 'top' }}>
+                      {barcodePhotos.map(att => {
+                        const url = getImageUrl(att.file_path);
+                        return (
+                          <span key={att.id} style={{ display: 'inline-block', width: '30px', height: '30px', border: '1px solid #ddd', borderRadius: '4px', overflow: 'hidden', cursor: 'pointer' }}
+                            onClick={() => openPreview(url, 'image')}>
+                            {url ? (
+                              <img src={url} alt="设备条码" style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                                onError={(e) => { e.target.style.display = 'none'; }} />
+                            ) : (
+                              <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', fontSize: '8px', color: '#999' }}>无图</span>
+                            )}
+                          </span>
+                        );
+                      })}
+                    </span>
+                  );
+                }
+                return <span>{rec.设备条码 || '-'}</span>;
+              })()}
+            </div>
+          </div>
+          <div style={{ flex: '1 1 auto', minWidth: 0 }}>
+            <div style={{ fontWeight: 'bold', marginBottom: '6px', color: '#1976d2', fontSize: '14px' }}>维修信息</div>
+            <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>维修单号：</strong></span>{rec.维修单号 || '-'}</div>
+            <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>保修状态：</strong></span>{rec.保修状态 || '-'}</div>
+            <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>返厂原因：</strong></span>{rec.返厂原因 || '-'}</div>
+            <div><span style={{ display: 'inline-block', width: '80px' }}><strong>故障描述：</strong></span>{rec.故障描述 || '-'}</div>
+            <div style={{ marginTop: '4px', background: rec.备注 ? '#fff3cd' : undefined, borderRadius: '4px', padding: rec.备注 ? '6px 8px' : undefined }}><span style={{ display: 'inline-block', width: '80px' }}><strong>备注：</strong></span>{rec.备注 ? <span style={{ color: '#e65100', fontWeight: 'bold' }}>{rec.备注}</span> : '-'}</div>
+          </div>
+          <div style={{ flex: '1 1 auto', minWidth: 0 }}>
+            <div style={{ fontWeight: 'bold', marginBottom: '6px', color: '#1976d2', fontSize: '14px' }}>物流信息</div>
+            <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>返厂快递：</strong></span>{rec.返厂快递 || '-'}</div>
+            <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>返厂单号：</strong></span>{rec.返厂单号 || '-'}</div>
+            <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>登记时间：</strong></span>{fmtTime(rec.创建时间)}</div>
+            {rec.状态 !== '已完成' && (rec.状态 === '维修中' || rec.支付凭证 === '拒维修') ? (
+              <>
+                <div style={{ marginBottom: '4px' }}>
+                  <span style={{ display: 'inline-block', width: '80px' }}><strong>寄回快递：</strong></span>
+                  <select
+                    value={quickReturnEdit[rec.维修单号]?.寄回快递 || rec.寄回快递 || ''}
+                    onChange={e => setQuickReturnEdit(prev => ({ ...prev, [rec.维修单号]: { ...(prev[rec.维修单号] || {}), 寄回快递: e.target.value } }))}
+                    style={{ padding: '2px 4px', borderRadius: '4px', border: '1px solid #ddd', fontSize: '12px', width: '120px' }}
+                  >
+                    <option value="">请选择快递</option>
+                    {options.couriers.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </div>
+                <div style={{ marginBottom: '4px' }}>
+                  <span style={{ display: 'inline-block', width: '80px' }}><strong>寄回单号：</strong></span>
+                  <input
+                    type="text"
+                    value={quickReturnEdit[rec.维修单号]?.寄回单号 || rec.寄回单号 || ''}
+                    onChange={e => setQuickReturnEdit(prev => ({ ...prev, [rec.维修单号]: { ...(prev[rec.维修单号] || {}), 寄回单号: formatOrderNo(e.target.value) } }))}
+                    placeholder="请输入单号"
+                    style={{ padding: '2px 4px', borderRadius: '4px', border: '1px solid #ddd', fontSize: '12px', width: '180px' }}
+                  />
+                </div>
+                <div>
+                  <span style={{ display: 'inline-block', width: '80px' }} />
+                  <button
+                    onClick={async () => {
+                      const returnData = quickReturnEdit[rec.维修单号] || {};
+                      if (!returnData.寄回快递 || !returnData.寄回单号) {
+                        alert('请填写完整的快递和单号');
+                        return;
+                      }
+                      try {
+                        await api.put(`/maintenance/${rec.维修单号}`, {
+                          寄回快递: returnData.寄回快递,
+                          寄回单号: returnData.寄回单号,
+                          状态: '已完成'
+                        });
+                        alert('更新成功');
+                        setQuickReturnEdit(prev => {
+                          const next = { ...prev };
+                          delete next[rec.维修单号];
+                          return next;
+                        });
+                        fetchRecords(1);
+                        setPage(1);
+                      } catch (err) {
+                        alert('更新失败：' + (err.response?.data?.error || err.message));
+                      }
+                    }}
+                    style={{ padding: '2px 12px', background: '#4caf50', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}
+                  >
+                    提交
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>寄回快递：</strong></span>{rec.寄回快递 || '-'}</div>
+                <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>寄回单号：</strong></span>{rec.寄回单号 || '-'}</div>
+                {rec.状态 === '已完成' && (
+                  <>
+                    <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>完成时间：</strong></span>{fmtTime(rec.完成时间)}</div>
+                    <div><span style={{ display: 'inline-block', width: '80px' }}><strong>操作人：</strong></span>{rec.操作人 || '-'}</div>
+                  </>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+
+        {attachments[rec.维修单号] && Array.isArray(attachments[rec.维修单号]) && attachments[rec.维修单号].filter(a => a.file_type !== 'barcode_photo').length > 0 && (
+          <div style={{ padding: isMobileView ? '10px 0 0' : '0', marginTop: isMobileView ? '0' : '8px' }}>
+            <div style={isMobileView ? {} : { background: '#f9f9f9', padding: '8px', border: '1px solid #ddd', borderRadius: '4px', textAlign: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', justifyContent: isMobileView ? 'flex-start' : 'center' }}>
+                <strong>维修附件：</strong>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                  {[...attachments[rec.维修单号]].filter(a => a.file_type !== 'barcode_photo').sort((a, b) => (a.status === 'pending' ? 1 : 0) - (b.status === 'pending' ? 1 : 0)).map(att => {
+                    const attType = getAttachmentType(att.mime_type);
+                    const url = getImageUrl(att.file_path);
+                    const isPending = att.status === 'pending';
+                    return (
+                      <div key={att.id} style={{ position: 'relative', width: '60px', height: '60px', border: '1px solid #ddd', borderRadius: '4px', overflow: 'hidden' }}>
+                        {attType === 'image' && url && (
+                          <img src={url} alt={att.original_name || '附件'} style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer' }}
+                            onClick={() => openPreview(url, 'image')} onError={(e) => { e.target.style.display = 'none'; }} />
+                        )}
+                        {attType === 'image' && (!url || !att.file_path) && (
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', background: '#f5f5f5', fontSize: '9px', color: '#999' }}>无图</div>
+                        )}
+                        {attType === 'video' && url && (
+                          <div onClick={() => openPreview(url, 'video')} style={{ width: '100%', height: '100%', cursor: 'pointer', position: 'relative', background: '#000' }}>
+                            <video src={url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                            <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', fontSize: '18px', color: '#fff', textShadow: '0 0 4px rgba(0,0,0,0.8)' }}>▶</div>
+                          </div>
+                        )}
+                        {attType === 'other' && (
+                          <div onClick={() => window.open(url, '_blank')} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', fontSize: '9px', color: '#666', padding: '2px', cursor: 'pointer' }} title={att.original_name || '点击打开'}>
+                            <span style={{ fontSize: '20px' }}>📄</span>
+                            <span style={{ marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '100%' }}>文件</span>
+                          </div>
+                        )}
+                        {isPending && !isAdmin && (
+                          <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(255, 152, 0, 0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                            <span style={{ color: '#fff', fontWeight: 'bold', fontSize: '10px', textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>审核中</span>
+                          </div>
+                        )}
+                        {isAdmin && (
+                          <button onClick={(e) => { e.stopPropagation(); if (window.confirm('确定要删除该附件吗？')) { handleDeleteAttachment(rec.维修单号, att.id); } }} style={{ position: 'absolute', top: '2px', right: '2px', width: '16px', height: '16px', padding: '0', fontSize: '10px', background: '#f44336', color: '#fff', border: 'none', borderRadius: '2px', cursor: 'pointer', lineHeight: '1' }}>×</button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {rec.支付凭证图片 && (
+          <div style={{ padding: '4px 0', marginTop: isMobileView ? '0' : '8px' }}>
+            <div style={isMobileView ? { display: 'flex', alignItems: 'center', gap: '8px' } : { background: '#f9f9f9', padding: '8px', border: '1px solid #ddd', borderRadius: '4px', textAlign: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', justifyContent: isMobileView ? 'flex-start' : 'center' }}>
+                <strong>支付凭证：</strong>
+                <img src={getImageUrl(rec.支付凭证图片)} alt="支付凭证"
+                  style={{ width: '60px', height: '60px', objectFit: 'cover', borderRadius: '4px', cursor: 'pointer', border: '1px solid #ddd' }}
+                  onClick={() => openPreview(getImageUrl(rec.支付凭证图片), 'image')} />
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div style={{ padding: isMobileView ? '8px 0 0' : '0', marginTop: isMobileView ? '0' : '8px' }}>
+          <div style={isMobileView ? { display: 'flex', gap: '8px', flexWrap: 'wrap' } : { background: '#f9f9f9', padding: '8px', border: '1px solid #ddd', borderRadius: '4px', textAlign: 'center' }}>
+            <div style={{ display: 'flex', gap: '8px', justifyContent: isMobileView ? 'flex-start' : 'center', flexWrap: 'wrap' }}>
+              <button onClick={(e) => { e.stopPropagation(); const hasPending = changeHistory[rec.维修单号] && changeHistory[rec.维修单号].some(cr => cr.status === 'pending'); if (hasPending) { alert('您有待审核的修改申请，请等待审核完成后再提交新的修改'); return; } handleEdit(rec); }}
+                style={{ padding: '4px 12px', background: '#1976d2', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
+                {rec.状态 === '预登记' ? '完善登记' : '修改记录'}
+              </button>
+              <button onClick={async (e) => { e.stopPropagation(); const id = rec.维修单号; let count = 0; const cached = attachments[id]; if (cached) { count = cached.filter(a => a.file_type === 'barcode_photo').length; } else { try { const res = await api.get(`/maintenance/${id}/attachments`); const data = res.data.attachments || res.data; const list = Array.isArray(data) ? data : []; setAttachments(prev => ({ ...prev, [id]: list })); count = list.filter(a => a.file_type === 'barcode_photo').length; } catch (err) { console.error('获取附件失败', err); } } setSuccessRecord({ ...rec, barcodePhotoCount: count }); setShowSuccessModal(true); }}
+                style={{ padding: '4px 12px', background: '#4caf50', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
+                分享记录
+              </button>
+              {isAdmin && (
+                <button onClick={async (e) => { e.stopPropagation(); if (!confirm('确定要删除这条维修记录吗？删除后无法恢复。')) return; try { await api.delete(`/maintenance/${rec.维修单号}`); alert('删除成功'); setPage(1); fetchRecords(1); } catch (err) { alert('删除失败：' + (err.response?.data?.error || err.message)); } }}
+                  style={{ padding: '4px 12px', background: '#f44336', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
+                  删除记录
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      </>
+    );
+  };
+
+  const openPreview = (url, type) => {
+    setPreviewUrl(url);
+    setPreviewType(type);
+    setShowPreviewModal(true);
+  };
+
+  const closePreview = () => {
+    setShowPreviewModal(false);
+    setPreviewUrl('');
+    setPreviewType('');
+  };
+
+  const getAttachmentType = (mimeType) => {
+    if (mimeType && mimeType.startsWith('image/')) return 'image';
+    if (mimeType && mimeType.startsWith('video/')) return 'video';
+    return 'file';
+  };
+
+  const getImageUrl = (filePath) => {
+    if (!filePath) return '';
+    const normalized = filePath.replace(/^\/app/, '');
+    const path = normalized.startsWith('/') ? normalized : '/' + normalized;
+    return API_BASE_URL + path;
+  };
+
+  const handleEdit = (record) => {
+    const recordWithDate = { ...record };
+    const originalWithDate = { ...record };
+    if (recordWithDate.购买日期) {
+      const dateOnly = recordWithDate.购买日期.split('T')[0];
+      recordWithDate.购买日期 = dateOnly;
+      originalWithDate.购买日期 = dateOnly;
+    }
+    setShowEditModal(true);
+    setEditingRecord(record);
+    setOriginalRecord(originalWithDate);
+    setEditFormData(recordWithDate);
+    setEditErrors({});
+    setEditSelectedFiles([]);
+    setEditFilePreviews([]);
+    setEditBarcodeFiles([]);
+    setEditBarcodeFilePreviews([]);
+    setEditAddressOptions({ provinces: [], cities: [], districts: [], towns: [] });
+    fetchAttachments(record.维修单号);
+    loadEditAddressOptions(record.省份, record.省份adcode, record.城市, record.城市adcode, record.区县, record.区县adcode, record.镇街道, record.镇街道adcode);
+  };
+
+  const handleEditFormChange = (field, value) => {
+    if (IMMUTABLE_FIELDS.includes(field)) return;
+    
+    // 限制联系电话只能输入数字，且最多 11 位
+    if (field === '联系电话') {
+      const numericValue = value.replace(/\D/g, '').slice(0, 11);
+      value = numericValue;
+    }
+    
+    setEditFormData(prev => ({ ...prev, [field]: value }));
+    if (value) {
+      setEditErrors(prev => ({ ...prev, [field]: '' }));
+    }
+    if (field === '购买日期') {
+      const warrantyStatus = calculateWarrantyStatus(value);
+      setEditFormData(prev => ({ ...prev, 保修状态: warrantyStatus }));
+    }
+  };
+
+  const handleEditFileChange = (e) => {
+    const newFiles = Array.from(e.target.files);
+    const allFiles = [...editSelectedFiles, ...newFiles];
+    setEditSelectedFiles(allFiles);
+    
+    const previews = newFiles.map(file => {
+      const fileType = file.type || '';
+      const isImage = fileType.startsWith('image/');
+      const isVideo = fileType.startsWith('video/');
+      return {
+        file,
+        preview: isImage || isVideo ? URL.createObjectURL(file) : null,
+        name: file.name,
+        type: fileType
+      };
+    });
+    setEditFilePreviews([...editFilePreviews, ...previews]);
+  };
+
+  const handleEditBarcodeFileChange = (e) => {
+    const newFiles = Array.from(e.target.files).filter(f => f.type.startsWith('image/'));
+    if (newFiles.length === 0) { alert('请选择图片文件'); return; }
+    const allFiles = [...editBarcodeFiles, ...newFiles];
+    setEditBarcodeFiles(allFiles);
+    const previews = newFiles.map(file => ({
+      file,
+      preview: URL.createObjectURL(file),
+      name: file.name,
+      type: file.type
+    }));
+    setEditBarcodeFilePreviews([...editBarcodeFilePreviews, ...previews]);
+  };
+
+  const uploadEditBarcodePhotos = async (maintenanceId) => {
+    for (const file of editBarcodeFiles) {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('file_type', 'barcode_photo');
+      formData.append('maintenance_id', maintenanceId);
+      try {
+        await api.post(`/maintenance/${maintenanceId}/attachments`, formData);
+      } catch (error) {
+        console.error('设备条码照片上传失败:', error);
+      }
+    }
+  };
+
+  const uploadEditAttachments = async (maintenanceId) => {
+    for (const file of editSelectedFiles) {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('status', 'pending');
+      formData.append('maintenance_id', maintenanceId);
+      try {
+        await api.post(`/maintenance/${maintenanceId}/attachments`, formData);
+      } catch (error) {
+        console.error('文件上传失败:', error);
+      }
+    }
+  };
+
+  const handleEditSubmit = async () => {
+    // 预登记记录：完善后直接提交转正式登记（跳过修改申请审核）
+    if (editingRecord.状态 === '预登记') {
+      const requiredFields = ['品牌', '型号', '类型', '颜色', '购买平台', '联系人', '联系电话', '电池要求', '报修平台', '省份', '城市', '镇街道', '详细地址', '返厂原因', '返厂快递', '返厂单号'];
+      const newErrors = {};
+      let hasError = false;
+      requiredFields.forEach(field => {
+        const value = editFormData[field];
+        if (!value || (typeof value === 'string' && value.trim() === '')) {
+          newErrors[field] = `${field}为必填项`;
+          hasError = true;
+        }
+      });
+      if (editFormData.联系电话 && !/^\d{11}$/.test(editFormData.联系电话)) {
+        newErrors['联系电话'] = '联系电话必须是 11 位数字';
+        hasError = true;
+      }
+      if (editFormData.购买平台 && editFormData.购买平台 !== '其它渠道') {
+        if (!editFormData.订单编号 || editFormData.订单编号.trim() === '') {
+          newErrors['订单编号'] = '订单编号为必填项';
+          hasError = true;
+        }
+      }
+      if (hasError) {
+        setEditErrors(newErrors);
+        alert('请填写所有必填项后再提交登记');
+        return;
+      }
+      try {
+        const updateData = { ...editFormData, 状态: '待处理' };
+        delete updateData.维修单号;
+        await api.put(`/maintenance/${editingRecord.维修单号}`, updateData);
+        if (editSelectedFiles.length > 0) {
+          await uploadEditAttachments(editingRecord.维修单号);
+        }
+        if (editBarcodeFiles.length > 0) {
+          await uploadEditBarcodePhotos(editingRecord.维修单号);
+        }
+        if (editSelectedFiles.length > 0 || editBarcodeFiles.length > 0) {
+          await fetchAttachments(editingRecord.维修单号);
+        }
+        alert('已提交登记，转为正式维修记录');
+        setShowEditModal(false);
+        setEditSelectedFiles([]);
+        setEditFilePreviews([]);
+        setEditBarcodeFiles([]);
+        setEditBarcodeFilePreviews([]);
+        setPage(1);
+        fetchRecords(1);
+      } catch (error) {
+        alert('提交失败：' + (error.response?.data?.error || error.message));
+      }
+      return;
+    }
+
+    // 验证联系电话格式（11 位数字）
+    if (editFormData.联系电话 && !/^\d{11}$/.test(editFormData.联系电话)) {
+      setEditErrors(prev => ({ ...prev, '联系电话': '联系电话必须是 11 位数字' }));
+      alert('联系电话必须是 11 位数字');
+      return;
+    }
+    
+    const editableFields = Object.keys(editFormData).filter(f => !IMMUTABLE_FIELDS.includes(f));
+
+    try {
+      const changedFields = {};
+      for (const key of Object.keys(editFormData)) {
+        const originalValue = originalRecord[key];
+        const newValue = editFormData[key];
+        
+        const orig = originalValue === undefined || originalValue === null ? '' : String(originalValue).trim();
+        const curr = newValue === undefined || newValue === null ? '' : String(newValue).trim();
+        
+        if (orig !== curr) {
+          changedFields[key] = { old: orig, new: curr };
+        }
+      }
+      
+      if (Object.keys(changedFields).length === 0 && editSelectedFiles.length === 0 && editBarcodeFiles.length === 0) {
+        alert('没有修改任何内容');
+        return;
+      }
+      
+      const onlyReturnFields = changedFields.寄回快递 !== undefined || changedFields.寄回单号 !== undefined;
+      const otherFieldChanged = Object.keys(changedFields).some(k => k !== '寄回快递' && k !== '寄回单号');
+      
+      if (onlyReturnFields && !otherFieldChanged) {
+        // 寄回快递/寄回单号只能在状态=已完成时才可编辑，直接提交简单值
+        const updateData = {};
+        if (changedFields.寄回快递) updateData.寄回快递 = changedFields.寄回快递.new;
+        if (changedFields.寄回单号) updateData.寄回单号 = changedFields.寄回单号.new;
+        
+        await api.put(`/maintenance/${editingRecord.维修单号}`, updateData);
+        
+        alert('更新成功');
+      } else {
+        const displayChangedFields = { ...changedFields };
+        delete displayChangedFields.requested_by;
+        
+        if (Object.keys(displayChangedFields).length > 0 || editSelectedFiles.length > 0 || editBarcodeFiles.length > 0) {
+          const payload = {
+            ...changedFields,
+            requested_by: user?.id || localStorage.getItem('userId')
+          };
+          await api.post(`/maintenance/${editingRecord.维修单号}/change-request`, payload);
+          alert('修改申请已提交，等待管理员审核');
+        } else {
+          alert('没有修改任何内容');
+        }
+      }
+      
+      if (editSelectedFiles.length > 0) {
+        await uploadEditAttachments(editingRecord.维修单号);
+      }
+      if (editBarcodeFiles.length > 0) {
+        await uploadEditBarcodePhotos(editingRecord.维修单号);
+      }
+      if (editSelectedFiles.length > 0 || editBarcodeFiles.length > 0) {
+        await fetchAttachments(editingRecord.维修单号);
+      }
+      
+      setShowEditModal(false);
+      setEditSelectedFiles([]);
+      setEditFilePreviews([]);
+      setEditBarcodeFiles([]);
+      setEditBarcodeFilePreviews([]);
+      setPage(1);
+      fetchRecords(1);
+    } catch (error) {
+      alert('提交失败：' + (error.response?.data?.error || '未知错误'));
+    }
+  };
+
+  const labelStyle = (fieldName) => ({
+    display: 'block',
+    marginBottom: '4px',
+    fontWeight: 'bold',
+    fontSize: '13px',
+    color: errors[fieldName] ? '#d32f2f' : '#333'
+  });
+
+  const inputStyle = (fieldName) => ({
+    width: '100%',
+    padding: '4px 8px',
+    border: errors[fieldName] ? '2px solid #d32f2f' : '1px solid #ddd',
+    borderRadius: '4px',
+    fontSize: '13px',
+    height: '28px',
+    boxSizing: 'border-box'
+  });
+
+  return (
+    <>
+      <style>{`
+        @keyframes expandFadeIn {
+          from {
+            opacity: 0;
+            transform: translateY(-10px);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
+        input[type="date"] { height: 28px; padding: 4px 8px; box-sizing: border-box; font-size: 13px; }
+        select { height: 28px; padding: 4px 8px; box-sizing: border-box; font-size: 13px; }
+      `}</style>
+      <div style={{ padding: isMobile ? '8px' : '16px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: isMobile ? '12px' : '16px' }}>
+        <h3 style={{ margin: 0, fontSize: isMobile ? '16px' : '18px', fontWeight: '600' }}>维修登记</h3>
+        <button
+          onClick={() => { if (!showForm) { openAddForm(); } else { setShowForm(false); } }}
+          style={{
+            padding: '6px 14px',
+            background: '#1976d2',
+            color: '#fff',
+            border: 'none',
+            borderRadius: '4px',
+            cursor: 'pointer',
+            fontSize: '13px'
+          }}
+        >
+          {showForm ? '关闭表单' : '新增登记'}
+        </button>
+      </div>
+
+      <div style={{ background: '#fff', padding: '12px', borderRadius: '8px', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '12px' }}>
+        <span style={{ fontSize: '13px', fontWeight: '500' }}>搜索：</span>
+        <div style={{ position: 'relative' }}>
+          <input
+            type="text"
+            placeholder="搜索：维修单号、联系人、地址等"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            style={{ padding: '6px 28px 6px 10px', border: '1px solid #ddd', borderRadius: '4px', fontSize: '13px', width: '280px', height: '32px', boxSizing: 'border-box' }}
+          />
+          {search && (
+            <span
+              onClick={() => setSearch('')}
+              title="清除搜索"
+              style={{ position: 'absolute', top: '50%', right: '8px', transform: 'translateY(-50%)', width: '16px', height: '16px', background: '#ccc', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', userSelect: 'none' }}
+            >
+              <svg width="8" height="8" viewBox="0 0 8 8" style={{ display: 'block' }}>
+                <path d="M1 1 L7 7 M7 1 L1 7" stroke="#fff" strokeWidth="1.3" strokeLinecap="round" fill="none" />
+              </svg>
+            </span>
+          )}
+        </div>
+      </div>
+
+      {showForm && (
+        <form onSubmit={handleSubmit} style={{ background: '#fff', padding: '16px', borderRadius: '8px', marginBottom: '16px' }}>
+          {/* 智能粘贴识别 */}
+          <div style={{ marginBottom: '12px', padding: '10px', background: '#f1f8e9', borderRadius: '6px', border: '1px solid #c8e6c9' }}>
+            <label style={{ display: 'block', marginBottom: '6px', fontWeight: 'bold', fontSize: '12px', color: '#2e7d32' }}>📋 智能粘贴识别</label>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <textarea
+                value={smartPasteText}
+                onChange={e => setSmartPasteText(e.target.value)}
+                placeholder="在此粘贴复制的订单信息，系统将自动识别并填写表单..."
+                style={{ flex: 1, minHeight: '40px', padding: '8px', fontSize: '13px', border: '2px dashed #81c784', borderRadius: '4px', resize: 'vertical', outline: 'none' }}
+              />
+              <button type="button" onClick={() => handleSmartPaste(smartPasteText)}
+                style={{ padding: '8px 16px', background: '#4caf50', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '13px', whiteSpace: 'nowrap', alignSelf: 'flex-end' }}>
+                识别填写
+              </button>
+            </div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: '12px' }}>
+            {/* 第一行：维修单号 */}
+            <div>
+              <label style={labelStyle('维修单号')}>维修单号</label>
+              <input style={{...inputStyle('维修单号'), background: '#f5f5f5', color: '#666'}} value={formData.维修单号 || ''} readOnly />
+            </div>
+            <div>
+              <label style={labelStyle('购买日期')}>购买日期</label>
+              <input style={{...inputStyle('购买日期'), appearance: 'none', WebkitAppearance: 'none', lineHeight: '20px'}} type="date" max={new Date().toISOString().split('T')[0]} value={formData.购买日期} onChange={e => handleFormChange('购买日期', e.target.value)} />
+            </div>
+            <div>
+              <label style={labelStyle('购买平台')}>购买平台</label>
+              <select style={inputStyle('购买平台')} value={formData.购买平台} onChange={e => handleFormChange('购买平台', e.target.value)}>
+                <option value="">请选择购买平台</option>
+                {options.platforms.map(p => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={labelStyle('订单编号')}>订单编号</label>
+              <input style={inputStyle('订单编号')} value={formData.订单编号} onChange={e => handleFormChange('订单编号', formatOrderNo(e.target.value))} placeholder="只能输入字母和数字" />
+            </div>
+
+            {/* 第二行：品牌 型号 类型 颜色 */}
+            <div>
+              <label style={labelStyle('品牌')}>品牌 *</label>
+              <select style={inputStyle('品牌')} value={formData.品牌} onChange={e => handleFormChange('品牌', e.target.value)}>
+                <option value="">请选择品牌</option>
+                {options.brands.map(b => <option key={b} value={b}>{b}</option>)}
+              </select>
+              {errors['品牌'] && <div style={{ color: '#d32f2f', fontSize: '12px', marginTop: '4px' }}>{errors['品牌']}</div>}
+            </div>
+            <div>
+              <label style={labelStyle('型号')}>型号 *</label>
+              <select style={inputStyle('型号')} value={formData.型号} onChange={e => handleFormChange('型号', e.target.value)} disabled={!formData.品牌}>
+                <option value="">请选择型号</option>
+                {options.models.map(m => <option key={m} value={m}>{m}</option>)}
+              </select>
+              {errors['型号'] && <div style={{ color: '#d32f2f', fontSize: '12px', marginTop: '4px' }}>{errors['型号']}</div>}
+            </div>
+            <div>
+              <label style={labelStyle('类型')}>类型 *</label>
+              <select style={inputStyle('类型')} value={formData.类型} onChange={e => handleFormChange('类型', e.target.value)} disabled={!formData.型号}>
+                <option value="">请选择类型</option>
+                {options.types.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+              {errors['类型'] && <div style={{ color: '#d32f2f', fontSize: '12px', marginTop: '4px' }}>{errors['类型']}</div>}
+            </div>
+            <div>
+              <label style={labelStyle('颜色')}>颜色 *</label>
+              <select style={inputStyle('颜色')} value={formData.颜色} onChange={e => handleFormChange('颜色', e.target.value)} disabled={!formData.类型}>
+                <option value="">请选择颜色</option>
+                {options.colors.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              {errors['颜色'] && <div style={{ color: '#d32f2f', fontSize: '12px', marginTop: '4px' }}>{errors['颜色']}</div>}
+            </div>
+
+            {/* 第三行：电池要求 保修状态 报修平台 */}
+            <div>
+              <label style={labelStyle('电池要求')}>电池要求</label>
+              <select style={inputStyle('电池要求')} value={formData.电池要求} onChange={e => handleFormChange('电池要求', e.target.value)}>
+                <option value="">请选择电池要求</option>
+                {options.battery_requires.map(b => <option key={b} value={b}>{b}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={labelStyle('保修状态')}>保修状态</label>
+              <input 
+                style={{ ...inputStyle('保修状态'), backgroundColor: '#f5f5f5', color: formData.保修状态 === '已过质保期' ? '#d32f2f' : '#388e3c', fontWeight: 'bold' }} 
+                value={formData.保修状态 || '已过质保期'} 
+                readOnly 
+              />
+            </div>
+            <div>
+              <label style={labelStyle('报修平台')}>报修平台</label>
+              <select style={inputStyle('报修平台')} value={formData.报修平台} onChange={e => handleFormChange('报修平台', e.target.value)}>
+                <option value="">请选择报修平台</option>
+                {options.repair_platforms.map(p => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </div>
+
+            {/* 第四行：省份 城市 区县 镇街道 */}
+            <div>
+              <label style={labelStyle('省份')}>省份</label>
+              <select style={inputStyle('省份')} value={formData.省份adcode || ''} onChange={handleProvinceChange}>
+                <option value="">请选择省份</option>
+                {addressOptions.provinces.map(p => <option key={p.adcode} value={p.adcode}>{p.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={labelStyle('城市')}>城市</label>
+              <select style={inputStyle('城市')} value={formData.城市adcode || ''} onChange={handleCityChange} disabled={!addressOptions.cities.length}>
+                <option value="">请选择城市</option>
+                {addressOptions.cities.map(c => <option key={`${c.adcode}-${c.name}`} value={c.adcode}>{c.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={labelStyle('区县')}>区县</label>
+              <select style={inputStyle('区县')} value={formData.区县 || ''} onChange={handleDistrictChange} disabled={!addressOptions.districts.length}>
+                <option value="">请选择区县</option>
+                {addressOptions.districts.map(d => <option key={`${d.adcode}-${d.name}`} value={d.name}>{d.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={labelStyle('镇街道')}>镇街道</label>
+              <select style={inputStyle('镇街道')} value={formData.镇街道 || ''} onChange={handleTownChange} disabled={!addressOptions.towns.length}>
+                <option value="">请选择镇街道</option>
+                {addressOptions.towns.map(t => <option key={`${t.adcode}-${t.name}`} value={t.name}>{t.name}</option>)}
+              </select>
+            </div>
+
+            {/* 第五行：详细地址 */}
+            <div style={{ gridColumn: isMobile ? 'span 2' : 'span 4' }}>
+              <label style={labelStyle('详细地址')}>详细地址</label>
+              <input style={{...inputStyle('详细地址'), width: '100%'}} value={formData.详细地址} onChange={e => handleFormChange('详细地址', e.target.value)} />
+            </div>
+
+            {/* 第六行：联系人 联系电话 返厂原因 故障描述 返厂快递 返厂单号 */}
+            <div>
+              <label style={labelStyle('联系人')}>联系人 *</label>
+              <input style={inputStyle('联系人')} value={formData.联系人} onChange={e => handleFormChange('联系人', e.target.value)} />
+              {errors['联系人'] && <div style={{ color: '#d32f2f', fontSize: '12px', marginTop: '4px' }}>{errors['联系人']}</div>}
+            </div>
+            <div>
+              <label style={labelStyle('联系电话')}>联系电话 *</label>
+              <input style={inputStyle('联系电话')} value={formData.联系电话} onChange={e => handleFormChange('联系电话', e.target.value)} />
+              {errors['联系电话'] && <div style={{ color: '#d32f2f', fontSize: '12px', marginTop: '4px' }}>{errors['联系电话']}</div>}
+            </div>
+            <div>
+              <label style={labelStyle('返厂原因')}>返厂原因</label>
+              <select style={inputStyle('返厂原因')} value={formData.返厂原因} onChange={e => handleFormChange('返厂原因', e.target.value)}>
+                <option value="">请选择返厂原因</option>
+                {options.return_reasons.map(r => <option key={r} value={r}>{r}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={labelStyle('故障描述')}>故障描述</label>
+              <input style={inputStyle('故障描述')} value={formData.故障描述} onChange={e => handleFormChange('故障描述', e.target.value)} />
+            </div>
+            <div>
+              <label style={labelStyle('返厂快递')}>返厂快递</label>
+              <select style={inputStyle('返厂快递')} value={formData.返厂快递} onChange={e => handleFormChange('返厂快递', e.target.value)}>
+                <option value="">请选择快递</option>
+                {options.couriers.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={labelStyle('返厂单号')}>返厂单号</label>
+              <input style={inputStyle('返厂单号')} value={formData.返厂单号} onChange={e => handleFormChange('返厂单号', formatOrderNo(e.target.value))} placeholder="只能输入字母和数字" />
+              {courierError && <div style={{ color: '#d32f2f', fontSize: '12px', marginTop: '4px' }}>{courierError}</div>}
+            </div>
+
+            {/* 备注（维修信息-故障描述下面） */}
+            <div style={{ gridColumn: isMobile ? 'span 2' : 'span 4' }}>
+              <label style={labelStyle('备注')}>备注</label>
+              <textarea style={{ width: '100%', minHeight: '80px', padding: '8px', border: '1px solid #ddd', borderRadius: '4px', fontSize: '13px', resize: 'vertical' }} value={formData.备注 || ''} onChange={e => handleFormChange('备注', e.target.value)} placeholder="请输入备注信息" />
+            </div>
+
+            {/* 第七行：登记人 */}
+            <div>
+              <label style={labelStyle('登记人')}>登记人</label>
+              <input style={{...inputStyle('登记人'), background: '#f5f5f5', color: '#666'}} value={formData.登记人 || ''} readOnly />
+            </div>
+          </div>
+
+          <div style={{ marginTop: '12px' }}>
+            <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>附件上传</label>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '8px' }}>
+              {filePreviews.map((item, idx) => (
+                <div key={idx} style={{ position: 'relative', width: '60px', height: '60px', border: '1px solid #ddd', borderRadius: '4px', overflow: 'hidden' }}>
+                  {item.preview ? (
+                    item.type.startsWith('video/') ? (
+                      <div 
+                        onClick={() => openPreview(item.preview, 'video')}
+                        style={{ width: '100%', height: '100%', cursor: 'pointer', position: 'relative' }}
+                      >
+                        <video src={item.preview} style={{ width: '100%', height: '100%', objectFit: 'cover' }} controls />
+                        <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', fontSize: '24px', color: '#fff', textShadow: '0 0 4px rgba(0,0,0,0.8)' }}>▶</div>
+                      </div>
+                    ) : (
+                      <div 
+                        onClick={() => openPreview(item.preview, 'image')}
+                        style={{ width: '100%', height: '100%', cursor: 'pointer' }}
+                      >
+                        <img 
+                          src={item.preview} 
+                          alt={item.name} 
+                          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                        />
+                      </div>
+                    )
+                  ) : (
+                    <>
+                      <span style={{ position: 'absolute', bottom: '2px', left: '2px', right: '2px', fontSize: '9px', color: '#fff', background: 'rgba(0,0,0,0.5)', textAlign: 'center', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>{item.name}</span>
+                    </>
+                  )}
+                  <button 
+                    onClick={() => {
+                      const newFiles = selectedFiles.filter((_, i) => i !== idx);
+                      const newPreviews = filePreviews.filter((_, i) => i !== idx);
+                      setSelectedFiles(newFiles);
+                      setFilePreviews(newPreviews);
+                    }}
+                    style={{ position: 'absolute', top: '2px', right: '2px', width: '18px', height: '18px', padding: '0', fontSize: '12px', background: '#f44336', color: '#fff', border: 'none', borderRadius: '50%', cursor: 'pointer', lineHeight: '1', zIndex: 1 }}
+                  >×</button>
+                </div>
+              ))}
+              <label style={{ 
+                width: '60px', 
+                height: '60px', 
+                border: '2px dashed #4caf50', 
+                borderRadius: '4px', 
+                display: 'flex', 
+                alignItems: 'center', 
+                justifyContent: 'center', 
+                cursor: 'pointer',
+                fontSize: '32px',
+                color: '#4caf50',
+                background: '#f9f9f9'
+              }}>
+                +
+                 <input 
+                   type="file" 
+                   multiple 
+                   accept="image/*,video/*,.pdf" 
+                   onChange={handleFileChange} 
+                   style={{ display: 'none' }} 
+                 />
+                 </label>
+                  <span
+                    contentEditable
+                    suppressContentEditableWarning
+                    onPaste={(e) => {
+                      handleContainerPaste(e, (f) => { setSelectedFiles(prev => [...prev, f]); setFilePreviews(prev => [...prev, { file: f, preview: URL.createObjectURL(f), name: f.name, type: f.type }]); });
+                    }}
+                    onBeforeInput={(e) => e.preventDefault()}
+                    onKeyDown={(e) => { if (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete') e.preventDefault(); }}
+                    onInput={(e) => { e.target.textContent = ''; }}
+                    style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '85px', height: '28px', fontSize: '11px', border: '1px dashed #1976d2', borderRadius: '4px', padding: '0 4px', outline: 'none', cursor: 'default', background: '#f0f7ff', color: '#1976d2', boxSizing: 'border-box', alignSelf: 'center', caretColor: 'transparent' }}
+                  >📋 右键粘贴</span>
+                </div>
+             </div>
+
+            {/* 设备条码照片上传 */}
+           <div style={{ marginTop: '12px' }}>
+             <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>设备条码照片</label>
+             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '8px' }}>
+               {barcodeFilePreviews.map((item, idx) => (
+                 <div key={idx} style={{ position: 'relative', width: '60px', height: '60px', border: '1px solid #ddd', borderRadius: '4px', overflow: 'hidden' }}>
+                   {item.preview ? (
+                     <div 
+                       onClick={() => openPreview(item.preview, 'image')}
+                       style={{ width: '100%', height: '100%', cursor: 'pointer' }}
+                     >
+                       <img 
+                         src={item.preview} 
+                         alt={item.name} 
+                         style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                       />
+                     </div>
+                   ) : null}
+                   <button 
+                     onClick={() => {
+                       const newFiles = barcodeFiles.filter((_, i) => i !== idx);
+                       const newPreviews = barcodeFilePreviews.filter((_, i) => i !== idx);
+                       setBarcodeFiles(newFiles);
+                       setBarcodeFilePreviews(newPreviews);
+                     }}
+                     style={{ position: 'absolute', top: '2px', right: '2px', width: '18px', height: '18px', padding: '0', fontSize: '12px', background: '#f44336', color: '#fff', border: 'none', borderRadius: '50%', cursor: 'pointer', lineHeight: '1', zIndex: 1 }}
+                   >×</button>
+                 </div>
+               ))}
+               <label style={{ 
+                 width: '60px', 
+                 height: '60px', 
+                 border: '2px dashed #4caf50', 
+                 borderRadius: '4px', 
+                 display: 'flex', 
+                 alignItems: 'center', 
+                 justifyContent: 'center', 
+                 cursor: 'pointer',
+                 fontSize: '32px',
+                 color: '#4caf50',
+                 background: '#f9f9f9'
+               }}>
+                 +
+                  <input 
+                    type="file" 
+                    multiple 
+                    accept="image/*" 
+                    onChange={handleBarcodeFileChange} 
+                    style={{ display: 'none' }} 
+                  />
+                 </label>
+                 <span
+                   contentEditable
+                   suppressContentEditableWarning
+                   onPaste={(e) => {
+                     handleContainerPaste(e, (f) => { setBarcodeFiles(prev => [...prev, f]); setBarcodeFilePreviews(prev => [...prev, { file: f, preview: URL.createObjectURL(f), name: f.name, type: f.type }]); });
+                   }}
+                   onBeforeInput={(e) => e.preventDefault()}
+                   onKeyDown={(e) => { if (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete') e.preventDefault(); }}
+                   onInput={(e) => { e.target.textContent = ''; }}
+                   style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '85px', height: '28px', fontSize: '11px', border: '1px dashed #1976d2', borderRadius: '4px', padding: '0 4px', outline: 'none', cursor: 'default', background: '#f0f7ff', color: '#1976d2', boxSizing: 'border-box', alignSelf: 'center', caretColor: 'transparent' }}
+                 >📋 右键粘贴</span>
+             </div>
+           </div>
+
+          <div style={{ display: 'flex', justifyContent: 'center', gap: '8px', marginTop: '16px' }}>
+            <button type="submit" style={{ padding: '8px 24px', background: '#1976d2', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '14px' }}>
+              提交登记
+            </button>
+            <button type="button" onClick={handlePreSave} style={{ padding: '8px 24px', background: '#9e9e9e', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '14px' }}>
+              预登记保存
+            </button>
+          </div>
+        </form>
+      )}
+
+      {!isMobile && (<div style={{ background: '#fff', borderRadius: '8px', overflow: 'hidden' }}>
+        <table className="table-card" style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
+          <thead>
+            <tr style={{ background: '#f6f6f6' }}>
+              <th style={{ textAlign: 'left', padding: '10px 8px', borderBottom: '1px solid #ddd', fontSize: '12px', fontWeight: '600', width: '120px' }}>客户</th>
+              <th style={{ textAlign: 'left', padding: '10px 8px', borderBottom: '1px solid #ddd', fontSize: '12px', fontWeight: '600', width: '150px' }}>返厂单号</th>
+              <th style={{ textAlign: 'left', padding: '10px 8px', borderBottom: '1px solid #ddd', fontSize: '12px', fontWeight: '600', width: '80px' }}>时效</th>
+              <th style={{ textAlign: 'left', padding: '10px 8px', borderBottom: '1px solid #ddd', fontSize: '12px', fontWeight: '600', width: '80px' }}>支付凭证</th>
+              <th style={{ textAlign: 'center', padding: '10px 8px', borderBottom: '1px solid #ddd', fontSize: '12px', fontWeight: '600', width: '80px' }}>状态</th>
+              <th style={{ textAlign: 'left', padding: '10px 8px', borderBottom: '1px solid #ddd', fontSize: '12px', fontWeight: '600', width: '70px' }}>登记人</th>
+              <th style={{ textAlign: 'center', padding: '10px 8px', borderBottom: '1px solid #ddd', fontSize: '12px', fontWeight: '600', width: '60px' }}>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && (
+              <tr><td colSpan={7} style={{ textAlign: 'center', padding: '20px', color: '#999' }}>加载中...</td></tr>
+            )}
+            {!loading && filteredRecords.length === 0 && (
+              <tr><td colSpan={7} style={{ textAlign: 'center', padding: '20px', color: '#999' }}>暂无数据</td></tr>
+            )}
+            {!loading && filteredRecords.map((rec) => (
+                <React.Fragment key={rec.维修单号}>
+                <tr style={{ borderBottom: '1px solid #eee', background: rec.状态 === '预登记' ? '#ececec' : (rec.备注 ? '#fff8e1' : undefined) }}>
+                  <td style={{ padding: '8px', fontSize: '12px', width: '120px' }}>{rec.联系人 || '-'}
+                    {rec.备注 && (
+                      <span title={rec.备注} style={{ display: 'inline-block', marginLeft: '6px', padding: '1px 6px', borderRadius: '4px', background: '#ff9800', color: '#fff', fontSize: '10px', fontWeight: 'bold', verticalAlign: 'middle', cursor: 'help', whiteSpace: 'nowrap' }}>📝 备注</span>
+                    )}
+                  </td>
+                  <td style={{ padding: '8px', fontSize: '12px', width: '150px' }}>{rec.返厂单号 || '-'}</td>
+                  <td style={{ padding: '8px', fontSize: '12px', fontWeight: 'bold', width: '80px', color: rec.状态 !== '已完成' && calcElapsed(rec.创建时间) !== '-' ? '#e65100' : '#999' }}>{rec.状态 === '已完成' ? '-' : calcElapsed(rec.创建时间)}</td>
+                  <td style={{ padding: '8px', fontSize: '12px', width: '80px' }}>
+                    {rec.支付凭证 === '已驳回' ? (
+                      <span 
+                        onClick={() => {
+                          setCurrentPaymentRecord(rec);
+                          setShowRejectDialog(true);
+                        }}
+                        style={{ 
+                          padding: '2px 8px',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          background: '#f44336',
+                          color: '#fff',
+                          fontSize: '11px',
+                          display: 'inline-block',
+                          textDecoration: 'underline'
+                        }}
+                      >
+                        已驳回
+                      </span>
+                    ) : (
+                      <span 
+                        onClick={() => openPaymentModal(rec)}
+                        style={{ 
+                          padding: '2px 8px',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          background: rec.支付凭证 === '已支付' ? '#4caf50' : rec.支付凭证 === '无费用' ? '#9e9e9e' : rec.支付凭证 === '待审核' ? '#ff9800' : rec.支付凭证 === '已驳回' ? '#f44336' : rec.支付凭证 === '拒维修' ? '#ff5722' : '#f44336',
+                          color: '#fff',
+                          fontSize: '11px',
+                          display: 'inline-block'
+                        }}
+                      >
+                        {rec.支付凭证 || '未支付'}
+                      </span>
+                    )}
+                  </td>
+                  <td style={{ padding: '8px', fontSize: '12px', width: '80px', textAlign: 'center' }}>
+                    {(() => {
+                      // 拒维修时强制显示"待处理"（但已完成时不覆盖）
+                      const actualStatus = (rec.支付凭证 === '拒维修' && rec.状态 !== '已完成') ? '待处理' : (rec.状态 || '待处理');
+                      const statusColors = {
+                        '待处理': '#ff9800',
+                        '维修中': '#1976d2',
+                        '已完成': '#333',
+                        '预登记': '#9e9e9e'
+                      };
+                      return (
+                        <span style={{
+                          padding: '2px 8px',
+                          borderRadius: '4px',
+                          background: statusColors[actualStatus] || '#999',
+                          color: '#fff',
+                          fontSize: '11px',
+                          display: 'inline-block'
+                        }}>
+                          {actualStatus}
+                        </span>
+                      );
+                    })()}
+                  </td>
+                  <td style={{ padding: '8px', fontSize: '12px', width: '70px' }}>{rec.登记人 || '-'}</td>
+                  <td style={{ padding: '8px', textAlign: 'center', width: '60px' }}>
+                    <span 
+                      onClick={() => toggleRow(rec.维修单号)}
+                      style={{ cursor: 'pointer', color: '#1976d2', fontWeight: 'bold', fontSize: '12px' }}
+                    >
+                      {expandedRows[rec.维修单号] ? '收起' : '展开'}
+                    </span>
+                  </td>
+                </tr>
+                <tr style={getExpandedRowStyle(expandedRows[rec.维修单号])}>
+                  <td colSpan={7} style={{ padding: '4px' }}>
+                      <table className="expanded-row-table">
+                        <tbody>
+                          <tr>
+                            <td colSpan={6} style={{ padding: '8px', border: '1px solid #ddd' }}>
+                              <div style={{ display: 'flex', gap: '12px', fontSize: '13px' }}>
+                                <div style={{ flex: 1 }}>
+                                  <div style={{ fontWeight: 'bold', marginBottom: '6px', color: '#1976d2', fontSize: '14px' }}>客户信息</div>
+                                  <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '70px' }}><strong>购买平台：</strong></span>{rec.购买平台 || '-'}</div>
+                                  <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '70px' }}><strong>订单编号：</strong></span>{rec.订单编号 || '-'}</div>
+                                  <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '70px' }}><strong>收件地址：</strong></span>{[rec.省份, rec.城市, rec.区县, rec.镇街道, rec.详细地址].filter(Boolean).join(' ') || '-'}</div>
+                                  <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '70px' }}><strong>收件人：</strong></span>{rec.联系人 || '-'}</div>
+                                  <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '70px' }}><strong>联系电话：</strong></span>{rec.联系电话 || '-'}</div>
+                                  <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '70px' }}><strong>报修平台：</strong></span>{rec.报修平台 || '-'}</div>
+                                </div>
+                                <div style={{ flex: 1 }}>
+                                  <div style={{ fontWeight: 'bold', marginBottom: '6px', color: '#1976d2', fontSize: '14px' }}>设备信息</div>
+                                  <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>购买日期：</strong></span>{rec.购买日期 ? rec.购买日期.split('T')[0] : '-'}</div>
+                                  <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>设备品牌：</strong></span>{rec.品牌 || '-'}</div>
+                                  <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>设备型号：</strong></span>{rec.型号 || '-'}</div>
+                                  <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>设备类型：</strong></span>{rec.类型 || '-'}</div>
+                                  <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>设备颜色：</strong></span>{rec.颜色 || '-'}</div>
+                                   <div>
+                                     <span style={{ display: 'inline-block', width: '80px' }}><strong>设备条码：</strong></span>
+                                     {(() => {
+                                       const barcodePhotos = attachments[rec.维修单号]?.filter(a => a.file_type === 'barcode_photo') || [];
+                                       if (barcodePhotos.length > 0) {
+                                         return (
+                                           <span style={{ display: 'inline-flex', gap: '4px', flexWrap: 'wrap', verticalAlign: 'top' }}>
+                                             {barcodePhotos.map(att => {
+                                               const url = getImageUrl(att.file_path);
+                                               return (
+                                                   <span key={att.id} style={{ display: 'inline-block', width: '30px', height: '30px', border: '1px solid #ddd', borderRadius: '4px', overflow: 'hidden', cursor: 'pointer' }}
+                                                     onClick={() => openPreview(url, 'image')}>
+                                                     {url ? (
+                                                       <img src={url} alt="设备条码" style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                                                         onError={(e) => { e.target.style.display = 'none'; }} />
+                                                     ) : (
+                                                       <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', fontSize: '8px', color: '#999' }}>无图</span>
+                                                     )}
+                                                  </span>
+                                                );
+                                              })}
+                                            </span>
+                                         );
+                                       }
+                                       return <span>{rec.设备条码 || '-'}</span>;
+                                     })()}
+                                   </div>
+                                 </div>
+                                 <div style={{ flex: 1 }}>
+                                   <div style={{ fontWeight: 'bold', marginBottom: '6px', color: '#1976d2', fontSize: '14px' }}>维修信息</div>
+                                  <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>维修单号：</strong></span>{rec.维修单号 || '-'}</div>
+                                  <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>保修状态：</strong></span>{rec.保修状态 || '-'}</div>
+<div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>返厂原因：</strong></span>{rec.返厂原因 || '-'}</div>
+                                   <div><span style={{ display: 'inline-block', width: '80px' }}><strong>故障描述：</strong></span>{rec.故障描述 || '-'}</div>
+                                   <div style={{ marginTop: '4px', background: rec.备注 ? '#fff3cd' : undefined, borderRadius: '4px', padding: rec.备注 ? '6px 8px' : undefined }}><span style={{ display: 'inline-block', width: '80px' }}><strong>备注：</strong></span>{rec.备注 ? <span style={{ color: '#e65100', fontWeight: 'bold' }}>{rec.备注}</span> : '-'}</div>
+                                 </div>
+                                 <div style={{ flex: 1 }}>
+                                   <div style={{ fontWeight: 'bold', marginBottom: '6px', color: '#1976d2', fontSize: '14px' }}>物流信息</div>
+                                  <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>返厂快递：</strong></span>{rec.返厂快递 || '-'}</div>
+                                  <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>返厂单号：</strong></span>{rec.返厂单号 || '-'}</div>
+                                  <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>登记时间：</strong></span>{fmtTime(rec.创建时间)}</div>
+                                  {rec.状态 !== '已完成' && (rec.状态 === '维修中' || rec.支付凭证 === '拒维修') ? (
+                                    <>
+                                      <div style={{ marginBottom: '4px' }}>
+                                        <span style={{ display: 'inline-block', width: '80px' }}><strong>寄回快递：</strong></span>
+                                        <select
+                                          value={quickReturnEdit[rec.维修单号]?.寄回快递 || rec.寄回快递 || ''}
+                                          onChange={e => setQuickReturnEdit(prev => ({ ...prev, [rec.维修单号]: { ...(prev[rec.维修单号] || {}), 寄回快递: e.target.value } }))}
+                                          style={{ padding: '2px 4px', borderRadius: '4px', border: '1px solid #ddd', fontSize: '12px', width: '120px' }}
+                                        >
+                                          <option value="">请选择快递</option>
+                                          {options.couriers.map(c => <option key={c} value={c}>{c}</option>)}
+                                        </select>
+                                      </div>
+                                      <div style={{ marginBottom: '4px' }}>
+                                        <span style={{ display: 'inline-block', width: '80px' }}><strong>寄回单号：</strong></span>
+                                        <input
+                                          type="text"
+                                          value={quickReturnEdit[rec.维修单号]?.寄回单号 || rec.寄回单号 || ''}
+                                          onChange={e => setQuickReturnEdit(prev => ({ ...prev, [rec.维修单号]: { ...(prev[rec.维修单号] || {}), 寄回单号: formatOrderNo(e.target.value) } }))}
+                                          placeholder="请输入单号"
+                                          style={{ padding: '2px 4px', borderRadius: '4px', border: '1px solid #ddd', fontSize: '12px', width: '180px' }}
+                                        />
+                                      </div>
+                                      <div>
+                                        <span style={{ display: 'inline-block', width: '80px' }} />
+                                        <button
+                                          onClick={async () => {
+                                            const returnData = quickReturnEdit[rec.维修单号] || {};
+                                            if (!returnData.寄回快递 || !returnData.寄回单号) {
+                                              alert('请填写完整的快递和单号');
+                                              return;
+                                            }
+                                             try {
+                                              await api.put(`/maintenance/${rec.维修单号}`, {
+                                                寄回快递: returnData.寄回快递,
+                                                寄回单号: returnData.寄回单号,
+                                                状态: '已完成'
+                                              });
+                                              alert('更新成功');
+                                              setQuickReturnEdit(prev => {
+                                                const next = { ...prev };
+                                                delete next[rec.维修单号];
+                                                return next;
+                                              });
+                                              fetchRecords(1);
+                                              setPage(1);
+                                            } catch (err) {
+                                              alert('更新失败：' + (err.response?.data?.error || err.message));
+                                            }
+                                          }}
+                                          style={{ padding: '2px 12px', background: '#4caf50', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}
+                                        >
+                                          提交
+                                        </button>
+                                      </div>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>寄回快递：</strong></span>{rec.寄回快递 || '-'}</div>
+                                      <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>寄回单号：</strong></span>{rec.寄回单号 || '-'}</div>
+                                      {rec.状态 === '已完成' && (
+                                        <>
+                                          <div style={{ marginBottom: '4px' }}><span style={{ display: 'inline-block', width: '80px' }}><strong>完成时间：</strong></span>{fmtTime(rec.完成时间)}</div>
+                                          <div><span style={{ display: 'inline-block', width: '80px' }}><strong>操作人：</strong></span>{rec.操作人 || '-'}</div>
+                                        </>
+                                      )}
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                          {attachments[rec.维修单号] && Array.isArray(attachments[rec.维修单号]) && attachments[rec.维修单号].filter(a => a.file_type !== 'barcode_photo').length > 0 && (
+                          <tr>
+                            <td style={{ padding: '4px 8px', border: '1px solid #ddd', background: '#f9f9f9', textAlign: 'center' }} colSpan={6}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <strong>维修附件：</strong>
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                                  {[...attachments[rec.维修单号]].filter(a => a.file_type !== 'barcode_photo').sort((a, b) => (a.status === 'pending' ? 1 : 0) - (b.status === 'pending' ? 1 : 0)).map(att => {
+                                  const attType = getAttachmentType(att.mime_type);
+                                  const url = getImageUrl(att.file_path);
+                                  const isPending = att.status === 'pending';
+                                  return (
+                                  <div key={att.id} style={{ position: 'relative', width: '60px', height: '60px', border: '1px solid #ddd', borderRadius: '4px', overflow: 'hidden' }}>
+                                    {attType === 'image' && url && (
+                                      <img 
+                                        src={url} 
+                                        alt={att.original_name || '附件'} 
+                                        style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer' }}
+                                        onClick={() => openPreview(url, 'image')}
+                                        onError={(e) => { e.target.style.display = 'none'; }}
+                                      />
+                                    )}
+                                    {attType === 'image' && (!url || !att.file_path) && (
+                                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', background: '#f5f5f5', fontSize: '9px', color: '#999' }}>无图</div>
+                                    )}
+                                    {attType === 'video' && url && (
+                                      <div 
+                                        onClick={() => openPreview(url, 'video')}
+                                        style={{ width: '100%', height: '100%', cursor: 'pointer', position: 'relative', background: '#000' }}
+                                      >
+                                        <video src={url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                                        <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', fontSize: '18px', color: '#fff', textShadow: '0 0 4px rgba(0,0,0,0.8)' }}>▶</div>
+                                      </div>
+                                    )}
+                                    {attType === 'other' && (
+                                      <div 
+                                        onClick={() => window.open(url, '_blank')}
+                                        style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', fontSize: '9px', color: '#666', padding: '2px', cursor: 'pointer' }}
+                                        title={att.original_name || '点击打开'}
+                                      >
+                                        <span style={{ fontSize: '20px' }}>📄</span>
+                                        <span style={{ marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '100%' }}>文件</span>
+                                      </div>
+                                    )}
+                                    {isPending && !isAdmin && (
+                                      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(255, 152, 0, 0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                        <span style={{ color: '#fff', fontWeight: 'bold', fontSize: '10px', textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>审核中</span>
+                                      </div>
+                                    )}
+                                    {isAdmin && (
+                                      <button onClick={(e) => { e.stopPropagation(); if (window.confirm('确定要删除该附件吗？')) { handleDeleteAttachment(rec.维修单号, att.id); } }} style={{ position: 'absolute', top: '2px', right: '2px', width: '16px', height: '16px', padding: '0', fontSize: '10px', background: '#f44336', color: '#fff', border: 'none', borderRadius: '2px', cursor: 'pointer', lineHeight: '1' }}>×</button>
+                                    )}
+                                  </div>
+                                  );
+                                })}
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                          )}
+                          {rec.支付凭证图片 && (
+                          <tr>
+                            <td style={{ padding: '4px 8px', border: '1px solid #ddd', background: '#f9f9f9', textAlign: 'center' }} colSpan={6}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <strong>支付凭证：</strong>
+                                <img 
+                                  src={getImageUrl(rec.支付凭证图片)} 
+                                  alt="支付凭证" 
+                                  style={{ width: '60px', height: '60px', objectFit: 'cover', borderRadius: '4px', cursor: 'pointer', border: '1px solid #ddd' }}
+                                  onClick={() => openPreview(getImageUrl(rec.支付凭证图片), 'image')}
+                                />
+                              </div>
+                            </td>
+                          </tr>
+                          )}
+                          <tr>
+                            <td style={{ padding: '4px 8px', border: '1px solid #ddd', background: '#f9f9f9', textAlign: 'center' }} colSpan={6}>
+                              <div style={{ display: 'flex', gap: '8px', justifyContent: 'center' }}>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    const hasPending = changeHistory[rec.维修单号] && changeHistory[rec.维修单号].some(cr => cr.status === 'pending');
+                                    if (hasPending) {
+                                      alert('您有待审核的修改申请，请等待审核完成后再提交新的修改');
+                                      return;
+                                    }
+                                    handleEdit(rec);
+                                  }}
+                                  style={{
+                                    padding: '4px 12px',
+                                    background: '#1976d2',
+                                    color: '#fff',
+                                    border: 'none',
+                                    borderRadius: '4px',
+                                    cursor: 'pointer',
+                                    fontSize: '12px'
+                                  }}
+                                >
+                                  {rec.状态 === '预登记' ? '完善登记' : '修改记录'}
+                                </button>
+                                <button
+                                  onClick={async (e) => {
+                                    e.stopPropagation();
+                                    const id = rec.维修单号;
+                                    let count = 0;
+                                    const cached = attachments[id];
+                                    if (cached) {
+                                      count = cached.filter(a => a.file_type === 'barcode_photo').length;
+                                    } else {
+                                      try {
+                                        const res = await api.get(`/maintenance/${id}/attachments`);
+                                        const data = res.data.attachments || res.data;
+                                        const list = Array.isArray(data) ? data : [];
+                                        setAttachments(prev => ({ ...prev, [id]: list }));
+                                        count = list.filter(a => a.file_type === 'barcode_photo').length;
+                                      } catch (err) {
+                                        console.error('获取附件失败', err);
+                                      }
+                                    }
+                                    setSuccessRecord({ ...rec, barcodePhotoCount: count });
+                                    setShowSuccessModal(true);
+                                  }}
+                                  style={{
+                                    padding: '4px 12px',
+                                    background: '#4caf50',
+                                    color: '#fff',
+                                    border: 'none',
+                                    borderRadius: '4px',
+                                    cursor: 'pointer',
+                                    fontSize: '12px',
+                                    marginLeft: '8px'
+                                  }}
+                                >
+                                  分享记录
+                                </button>
+                                {isAdmin && (
+                                <button
+                                  onClick={async (e) => {
+                                    e.stopPropagation();
+                                    if (!confirm('确定要删除这条维修记录吗？删除后无法恢复。')) return;
+                                    try {
+                                      await api.delete(`/maintenance/${rec.维修单号}`);
+                                      alert('删除成功');
+                                      setPage(1);
+                                      fetchRecords(1);
+                                    } catch (err) {
+                                      alert('删除失败：' + (err.response?.data?.error || err.message));
+                                    }
+                                  }}
+                                  style={{
+                                    padding: '4px 12px',
+                                    background: '#f44336',
+                                    color: '#fff',
+                                    border: 'none',
+                                    borderRadius: '4px',
+                                    cursor: 'pointer',
+                                    fontSize: '12px'
+                                  }}
+                                >
+                                  删除记录
+                                </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </td>
+                  </tr>
+                </React.Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>)}
+
+      {isMobile && (
+        <div>
+          {loading && <div style={{ textAlign: 'center', padding: '20px', color: '#999' }}>加载中...</div>}
+          {!loading && filteredRecords.length === 0 && <div style={{ textAlign: 'center', padding: '20px', color: '#999' }}>暂无数据</div>}
+          {!loading && filteredRecords.map((rec) => (
+            <div key={rec.维修单号} style={{ background: rec.状态 === '预登记' ? '#ececec' : (rec.备注 ? '#fff8e1' : '#fff'), borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', marginBottom: '10px', border: rec.备注 ? '1px solid #ffb300' : '1px solid #eee', overflow: 'hidden' }}>
+              <div onClick={() => toggleRow(rec.维修单号)} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', alignItems: 'center', gap: '8px', padding: '10px 12px', cursor: 'pointer' }}>
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                    <span style={{ fontWeight: 600, fontSize: '14px' }}>{rec.联系人 || '-'}</span>
+                    {rec.备注 && (
+                      <span title={rec.备注} style={{ display: 'inline-block', padding: '1px 6px', borderRadius: '4px', background: '#ff9800', color: '#fff', fontSize: '10px', fontWeight: 'bold', cursor: 'help', whiteSpace: 'nowrap' }}>📝 备注</span>
+                    )}
+                    {rec.状态 !== '已完成' && <span style={{ fontSize: '12px', color: '#e65100', fontWeight: 'bold' }}>{calcElapsed(rec.创建时间)}</span>}
+                  </div>
+                  <div style={{ fontSize: '12px', color: '#666' }}>{rec.返厂单号 || ''}</div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <span onClick={(e) => { e.stopPropagation(); openPaymentModal(rec); }} style={{ padding: '2px 8px', borderRadius: '4px', background: paymentColors[rec.支付凭证] || '#f44336', color: '#fff', fontSize: '11px', display: 'inline-block', textAlign: 'center', whiteSpace: 'nowrap', cursor: 'pointer' }}>
+                    {rec.支付凭证 || '未支付'}
+                  </span>
+                  <span style={{ padding: '2px 8px', borderRadius: '4px', background: statusColors[rec.状态 || '待处理'] || '#999', color: '#fff', fontSize: '11px', display: 'inline-block', textAlign: 'center' }}>
+                    {rec.状态 || '待处理'}
+                  </span>
+                </div>
+                <span style={{ color: '#1976d2', fontSize: '12px', cursor: 'pointer', userSelect: 'none' }}>
+                  {expandedRows[rec.维修单号] ? '收起' : '展开'}
+                </span>
+              </div>
+              {expandedRows[rec.维修单号] && (
+                <div style={{ padding: '0 12px 12px', borderTop: '1px solid #eee', fontSize: '13px', lineHeight: '1.6' }}>
+                  {renderDetailContent(rec, true)}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <Pagination page={page} total={total} limit={PAGE_SIZE} onPageChange={handlePageChange} />
+
+      {showSuccessModal && successRecord && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000 }}>
+          <div style={{ background: '#fff', borderRadius: '8px', padding: '24px', maxWidth: '500px', width: '90%', maxHeight: '80vh', overflow: 'auto' }}>
+            <h3 style={{ margin: '0 0 16px 0', fontSize: '18px', fontWeight: '600', color: '#4caf50' }}>登记成功</h3>
+            <div style={{ fontSize: '14px', lineHeight: '1.8', marginBottom: '20px' }}>
+              <div><strong>维修单号：</strong>{successRecord.维修单号}</div>
+              <div><strong>联系人：</strong>{successRecord.联系人}</div>
+              <div><strong>联系电话：</strong>{successRecord.联系电话}</div>
+              <div><strong>地址：</strong>{successRecord.省份}{successRecord.城市}{successRecord.区县}{successRecord.镇街道}{successRecord.详细地址}</div>
+              <div><strong>品牌型号：</strong>{successRecord.品牌} {successRecord.型号}</div>
+              <div><strong>设备条码照片：</strong>{successRecord.barcodePhotoCount > 0 ? `已上传 ${successRecord.barcodePhotoCount} 张` : '未上传'}</div>
+              <div><strong>购买日期：</strong>{successRecord.购买日期}</div>
+              <div><strong>电池要求：</strong>{successRecord.电池要求}</div>
+              <div><strong>保修状态：</strong>{successRecord.保修状态}</div>
+              <div><strong>返厂原因：</strong>{successRecord.返厂原因}</div>
+              <div><strong>故障描述：</strong>{successRecord.故障描述}</div>
+              <div style={{ background: successRecord.备注 ? '#fff3cd' : undefined, borderRadius: '4px', padding: successRecord.备注 ? '6px 8px' : undefined, margin: successRecord.备注 ? '4px 0' : undefined }}><strong>备注：</strong>{successRecord.备注 ? <span style={{ color: '#e65100', fontWeight: 'bold' }}>{successRecord.备注}</span> : '-'}</div>
+              <div><strong>返厂快递：</strong>{successRecord.返厂快递 || '-'}</div>
+              <div><strong>返厂单号：</strong>{successRecord.返厂单号 || '-'}</div>
+              <div><strong>维修记录查询：</strong><a href="https://emigrated.i234.me:5443/#/maintenance-records" target="_blank" rel="noopener noreferrer" style={{ color: '#1976d2', textDecoration: 'none' }}>https://emigrated.i234.me:5443/#/maintenance-records</a></div>
+            </div>
+            <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => {
+                  const text = `维修单号：${successRecord.维修单号}
+联系人：${successRecord.联系人}
+联系电话：${successRecord.联系电话}
+地址：${successRecord.省份}${successRecord.城市}${successRecord.区县}${successRecord.镇街道}${successRecord.详细地址}
+品牌型号：${successRecord.品牌} ${successRecord.型号}
+ 设备条码照片：${successRecord.barcodePhotoCount > 0 ? `已上传 ${successRecord.barcodePhotoCount} 张` : '未上传'}
+ 购买日期：${successRecord.购买日期}
+电池要求：${successRecord.电池要求}
+保修状态：${successRecord.保修状态}
+返厂原因：${successRecord.返厂原因}
+故障描述：${successRecord.故障描述}
+备注：${successRecord.备注 || ''}
+返厂快递：${successRecord.返厂快递 || '-'}
+返厂单号：${successRecord.返厂单号 || '-'}
+维修记录查询：https://emigrated.i234.me:5443/#/maintenance-records`;
+                  copyToClipboard(text).then(() => {
+                    alert('已复制到剪贴板');
+                  }).catch(() => {
+                    alert('复制失败，请手动复制');
+                  });
+                }}
+                style={{ padding: '8px 20px', background: '#1976d2', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '14px' }}
+              >
+                复制信息
+              </button>
+              <button
+                onClick={() => {
+                  setShowSuccessModal(false);
+                  setSuccessRecord(null);
+                }}
+                style={{ padding: '8px 20px', background: '#757575', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '14px' }}
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showPreviewModal && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000 }} onClick={closePreview}>
+          <div style={{ position: 'relative', maxWidth: '90%', maxHeight: '90%' }} onClick={e => e.stopPropagation()}>
+            {previewType === 'video' ? (
+              <video src={previewUrl} controls style={{ maxWidth: '100%', maxHeight: '90vh' }} />
+            ) : (
+              <img src={previewUrl} alt="预览" style={{ maxWidth: '100%', maxHeight: '90vh' }} />
+            )}
+            <button onClick={closePreview} style={{ position: 'absolute', top: '-40px', right: 0, background: 'none', border: 'none', color: '#fff', fontSize: '30px', cursor: 'pointer' }}>×</button>
+          </div>
+        </div>
+      )}
+
+      {showPaymentModal && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1500 }}>
+          <div style={{ background: '#fff', borderRadius: '8px', padding: '20px', minWidth: '350px' }}>
+            <h4 style={{ margin: '0 0 16px 0', fontSize: '16px' }}>
+              {currentPaymentRecord?.状态 === '待审核' && isAdmin ? '审核支付凭证 - ' : '修改支付凭证 - '}
+              {currentPaymentRecord?.维修单号}
+            </h4>
+            {currentPaymentRecord?.状态 === '待审核' && isAdmin ? (
+              <>
+                <div style={{ marginBottom: '12px' }}>
+                  <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold' }}>支付状态</label>
+                  <div style={{ padding: '8px', background: '#f5f5f5', borderRadius: '4px', fontSize: '13px' }}>
+                    {currentPaymentRecord.支付凭证 || '-'}
+                  </div>
+                </div>
+                {currentPaymentRecord.支付凭证图片 && (
+                  <div style={{ marginBottom: '12px' }}>
+                    <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold' }}>支付凭证</label>
+                    <img src={getImageUrl(currentPaymentRecord.支付凭证图片)} alt="支付凭证" style={{ maxWidth: '300px', maxHeight: '200px', border: '1px solid #ddd', borderRadius: '4px' }} />
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                  <button 
+                    onClick={() => setShowPaymentModal(false)}
+                    style={{ padding: '8px 16px', background: '#9e9e9e', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+                  >
+                    取消
+                  </button>
+                  <button 
+                    onClick={async () => {
+                      try {
+                        await api.post(`/maintenance/${currentPaymentRecord.维修单号}/payment-approve`, { action: 'rejected' });
+                        alert('已驳回');
+                        setShowPaymentModal(false);
+                        setPage(1);
+                        fetchRecords(1);
+                      } catch (error) {
+                        alert('操作失败');
+                      }
+                    }}
+                    style={{ padding: '8px 16px', background: '#f44336', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+                  >
+                    驳回
+                  </button>
+                  <button 
+                    onClick={async () => {
+                      try {
+                        await api.post(`/maintenance/${currentPaymentRecord.维修单号}/payment-approve`, { action: 'approved' });
+                        alert('审核通过');
+                        setShowPaymentModal(false);
+                        setPage(1);
+                        fetchRecords(1);
+                      } catch (error) {
+                        alert('操作失败');
+                      }
+                    }}
+                    style={{ padding: '8px 16px', background: '#4caf50', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+                  >
+                    审核通过
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ marginBottom: '12px' }}>
+                  <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold' }}>支付状态</label>
+                  <select 
+                    value={paymentStatus} 
+                    onChange={(e) => setPaymentStatus(e.target.value)}
+                    style={{ width: '100%', height: '36px', padding: '0 8px', border: '1px solid #ddd', borderRadius: '4px', fontSize: '13px', lineHeight: '36px', background: '#fff' }}
+                  >
+                     <option value="无费用">无费用</option>
+                    <option value="已支付">已支付</option>
+                    <option value="拒维修">拒维修</option>
+                  </select>
+                </div>
+                   <div style={{ marginBottom: '12px' }}>
+                    <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold' }}>
+                      上传支付凭证图片 <span style={{ color: '#f44336' }}>*</span>
+                    </label>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      <label style={{ width: '60px', height: '60px', border: '2px dashed #4caf50', borderRadius: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', fontSize: '32px', color: '#4caf50', background: '#f9f9f9' }}>
+                        +
+                        <input type="file" accept="image/*" onChange={handlePaymentImageChange} style={{ display: 'none' }} />
+                      </label>
+                       <span
+                         contentEditable
+                         suppressContentEditableWarning
+                         onPaste={(e) => {
+                           handleContainerPaste(e, (f) => { setPaymentImage(f); setPaymentImagePreview(URL.createObjectURL(f)); });
+                         }}
+                         onBeforeInput={(e) => e.preventDefault()}
+                         onKeyDown={(e) => { if (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete') e.preventDefault(); }}
+                         onInput={(e) => { e.target.textContent = ''; }}
+                         style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '85px', height: '28px', fontSize: '11px', border: '1px dashed #1976d2', borderRadius: '4px', padding: '0 4px', outline: 'none', cursor: 'default', background: '#f0f7ff', color: '#1976d2', boxSizing: 'border-box', caretColor: 'transparent' }}
+                       >📋 右键粘贴</span>
+                    </div>
+                    {paymentImagePreview && (
+                      <div style={{ marginTop: '8px' }}>
+                        <img src={paymentImagePreview} alt="支付凭证预览" style={{ maxWidth: '200px', maxHeight: '150px', border: '1px solid #ddd', borderRadius: '4px' }} />
+                      </div>
+                    )}
+                  </div>
+                <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                  <button 
+                    onClick={() => setShowPaymentModal(false)}
+                    style={{ padding: '8px 16px', background: '#9e9e9e', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+                  >
+                    取消
+                  </button>
+                  <button 
+                    onClick={handlePaymentSubmit}
+                    disabled={!paymentImage}
+                    style={{ padding: '8px 16px', background: !paymentImage ? '#ccc' : '#4caf50', color: '#fff', border: 'none', borderRadius: '4px', cursor: !paymentImage ? 'not-allowed' : 'pointer' }}
+                  >
+                    保存
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {showRejectDialog && currentPaymentRecord && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1500 }}>
+          <div style={{ background: '#fff', borderRadius: '8px', padding: '20px', minWidth: '350px' }}>
+            <h4 style={{ margin: '0 0 16px 0', fontSize: '16px' }}>
+              支付凭证驳回详情 - {currentPaymentRecord.维修单号}
+            </h4>
+            <div style={{ marginBottom: '16px', padding: '12px', background: '#fff3f3', borderRadius: '4px', border: '1px solid #ffcdd2' }}>
+              <div style={{ marginBottom: '8px', fontWeight: 'bold', color: '#d32f2f' }}>驳回原因：</div>
+              <div style={{ color: '#666', fontSize: '13px' }}>
+                {currentPaymentRecord.支付驳回原因 || '无'}
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+              <button 
+                onClick={() => setShowRejectDialog(false)}
+                style={{ padding: '8px 16px', background: '#9e9e9e', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+              >
+                关闭
+              </button>
+              <button 
+                onClick={() => {
+                  setShowRejectDialog(false);
+                  openPaymentModal(currentPaymentRecord);
+                }}
+                style={{ padding: '8px 16px', background: '#1976d2', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+              >
+                修改
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showEditModal && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: '#fff', borderRadius: '8px', width: '90%', maxWidth: '900px', maxHeight: '90vh', overflow: 'auto', padding: '20px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <h4 style={{ margin: 0, fontSize: '18px', fontWeight: '600' }}>{editingRecord?.状态 === '预登记' ? '完善登记' : '修改记录'} - {editingRecord?.维修单号}</h4>
+              <button onClick={() => { setShowEditModal(false); setEditSelectedFiles([]); setEditFilePreviews([]); }} style={{ background: 'none', border: 'none', fontSize: '20px', cursor: 'pointer', color: '#666' }}>×</button>
+            </div>
+            <div style={{ fontSize: '12px', color: '#666', marginBottom: '16px' }}>
+              <span style={{ color: '#f44336' }}>*</span> 为必填项，修改后需管理员审核
+            </div>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: '12px' }}>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>维修单号</label>
+                <input style={{ ...inputStyle('维修单号'), background: '#f5f5f5', color: '#666' }} value={editFormData.维修单号 || ''} readOnly />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: editErrors['联系人'] ? '#d32f2f' : '#333' }}>联系人 *</label>
+                <input style={inputStyle('联系人')} value={editFormData.联系人 || ''} onChange={e => handleEditFormChange('联系人', e.target.value)} />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: editErrors['联系电话'] ? '#d32f2f' : '#333' }}>联系电话 *</label>
+                <input style={inputStyle('联系电话')} value={editFormData.联系电话 || ''} onChange={e => handleEditFormChange('联系电话', e.target.value)} />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>省份</label>
+                <select style={inputStyle('省份')} value={editFormData.省份adcode || ''} onChange={handleEditProvinceChange}>
+                  <option value="">请选择省份</option>
+                  {editAddressOptions.provinces.map(p => <option key={p.adcode} value={p.adcode}>{p.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>城市</label>
+                <select style={inputStyle('城市')} value={editFormData.城市adcode || ''} onChange={handleEditCityChange} disabled={!editAddressOptions.cities.length}>
+                  <option value="">请选择城市</option>
+                  {editAddressOptions.cities.map(c => <option key={`${c.adcode}-${c.name}`} value={c.adcode}>{c.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>区县</label>
+                <select style={inputStyle('区县')} value={editFormData.区县 || ''} onChange={handleEditDistrictChange} disabled={!editAddressOptions.districts.length}>
+                  <option value="">请选择区县</option>
+                  {editAddressOptions.districts.map(d => <option key={`${d.adcode}-${d.name}`} value={d.name}>{d.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>镇街道</label>
+                <select style={inputStyle('镇街道')} value={editFormData.镇街道 || ''} onChange={handleEditTownChange} disabled={!editAddressOptions.towns.length}>
+                  <option value="">请选择镇街道</option>
+                  {editAddressOptions.towns.map(t => <option key={`${t.adcode}-${t.name}`} value={t.name}>{t.name}</option>)}
+                </select>
+              </div>
+              <div style={{ gridColumn: isMobile ? 'span 2' : 'span 4' }}>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>详细地址</label>
+                <input style={{ ...inputStyle('详细地址'), width: '100%' }} value={editFormData.详细地址 || ''} onChange={e => handleEditFormChange('详细地址', e.target.value)} />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: editErrors['品牌'] ? '#d32f2f' : '#333' }}>品牌 *</label>
+                <select style={inputStyle('品牌')} value={editFormData.品牌 || ''} onChange={e => handleEditFormChange('品牌', e.target.value)}>
+                  <option value="">请选择品牌</option>
+                  {options.brands.map(b => <option key={b} value={b}>{b}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: editErrors['型号'] ? '#d32f2f' : '#333' }}>型号 *</label>
+                <select style={inputStyle('型号')} value={editFormData.型号 || ''} onChange={e => handleEditFormChange('型号', e.target.value)} disabled={!editFormData.品牌}>
+                  <option value="">请选择型号</option>
+                  {options.models.map(m => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: editErrors['类型'] ? '#d32f2f' : '#333' }}>类型 *</label>
+                <select style={inputStyle('类型')} value={editFormData.类型 || ''} onChange={e => handleEditFormChange('类型', e.target.value)} disabled={!editFormData.型号}>
+                  <option value="">请选择类型</option>
+                  {options.types.map(t => <option key={t} value={t}>{t}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: editErrors['颜色'] ? '#d32f2f' : '#333' }}>颜色 *</label>
+                <select style={inputStyle('颜色')} value={editFormData.颜色 || ''} onChange={e => handleEditFormChange('颜色', e.target.value)} disabled={!editFormData.类型}>
+                  <option value="">请选择颜色</option>
+                  {options.colors.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>返厂原因</label>
+                <select style={inputStyle('返厂原因')} value={editFormData.返厂原因 || ''} onChange={e => handleEditFormChange('返厂原因', e.target.value)}>
+                  <option value="">请选择返厂原因</option>
+                  {options.return_reasons.map(r => <option key={r} value={r}>{r}</option>)}
+                </select>
+              </div>
+              <div style={{ gridColumn: isMobile ? 'span 2' : 'span 3' }}>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>设备条码照片</label>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                  {/* 已有的设备条码照片 */}
+                  {(() => {
+                    const existingBarcode = attachments[editingRecord?.维修单号]?.filter(a => a.file_type === 'barcode_photo') || [];
+                    return existingBarcode.map(att => {
+                      const url = getImageUrl(att.file_path);
+                      return (
+                        <span key={att.id} style={{ display: 'inline-block', width: '60px', height: '60px', border: '1px solid #ddd', borderRadius: '4px', overflow: 'hidden', cursor: 'pointer' }}
+                          onClick={() => openPreview(url, 'image')}>
+                          {url ? (
+                            <img src={url} alt="设备条码" style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                              onError={(e) => { e.target.style.display = 'none'; }} />
+                          ) : (
+                            <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', fontSize: '11px', color: '#999' }}>无图</span>
+                          )}
+                        </span>
+                      );
+                    });
+                  })()}
+                  {/* 新选的设备条码照片预览 */}
+                  {editBarcodeFilePreviews.map((item, idx) => (
+                    <span key={`new-${idx}`} style={{ position: 'relative', display: 'inline-block', width: '60px', height: '60px', border: '1px solid #4caf50', borderRadius: '4px', overflow: 'hidden' }}>
+                      <img src={item.preview} alt={item.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      <button type="button" onClick={() => {
+                        const newFiles = editBarcodeFiles.filter((_, i) => i !== idx);
+                        const newPreviews = editBarcodeFilePreviews.filter((_, i) => i !== idx);
+                        setEditBarcodeFiles(newFiles);
+                        setEditBarcodeFilePreviews(newPreviews);
+                      }} style={{ position: 'absolute', top: '2px', right: '2px', width: '18px', height: '18px', padding: '0', fontSize: '12px', background: '#f44336', color: '#fff', border: 'none', borderRadius: '50%', cursor: 'pointer', lineHeight: '1' }}>×</button>
+                    </span>
+                  ))}
+                  {/* 添加按钮 */}
+                  <label style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '60px', height: '60px', border: '2px dashed #4caf50', borderRadius: '4px', cursor: 'pointer', background: '#f1f8e9', fontSize: '32px', color: '#4caf50', transition: 'all 0.2s' }}
+                    title="上传设备条码照片">
+                    +
+                    <input type="file" accept="image/*" style={{ display: 'none' }} onChange={handleEditBarcodeFileChange} />
+                  </label>
+                    <span
+                      contentEditable
+                      suppressContentEditableWarning
+                      onPaste={(e) => {
+                        handleContainerPaste(e, (f) => { setEditBarcodeFiles(prev => [...prev, f]); setEditBarcodeFilePreviews(prev => [...prev, { file: f, preview: URL.createObjectURL(f), name: f.name, type: f.type }]); });
+                      }}
+                      onBeforeInput={(e) => e.preventDefault()}
+                      onKeyDown={(e) => { if (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete') e.preventDefault(); }}
+                      onInput={(e) => { e.target.textContent = ''; }}
+                      style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '85px', height: '28px', fontSize: '11px', border: '1px dashed #1976d2', borderRadius: '4px', padding: '0 4px', outline: 'none', cursor: 'default', background: '#f0f7ff', color: '#1976d2', boxSizing: 'border-box', verticalAlign: 'middle', caretColor: 'transparent' }}
+                    >📋 右键粘贴</span>
+                  </div>
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>购买日期</label>
+                <input style={{...inputStyle('购买日期'), appearance: 'none', WebkitAppearance: 'none', lineHeight: '20px'}} type="date" max={new Date().toISOString().split('T')[0]} value={editFormData.购买日期 || ''} onChange={e => handleEditFormChange('购买日期', e.target.value)} />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>购买平台</label>
+                <select style={inputStyle('购买平台')} value={editFormData.购买平台 || ''} onChange={e => handleEditFormChange('购买平台', e.target.value)}>
+                  <option value="">请选择购买平台</option>
+                  {options.platforms.map(p => <option key={p} value={p}>{p}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>订单编号</label>
+                <input style={inputStyle('订单编号')} value={editFormData.订单编号 || ''} onChange={e => handleEditFormChange('订单编号', formatOrderNo(e.target.value))} placeholder="只能输入字母和数字" />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>保修状态</label>
+                <input 
+                  style={{ ...inputStyle('保修状态'), backgroundColor: '#f5f5f5', color: editFormData.保修状态 === '已过质保期' ? '#d32f2f' : '#388e3c', fontWeight: 'bold' }} 
+                  value={editFormData.保修状态 || '已过质保期'} 
+                  readOnly 
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>电池要求</label>
+                <select style={inputStyle('电池要求')} value={editFormData.电池要求 || ''} onChange={e => handleEditFormChange('电池要求', e.target.value)}>
+                  <option value="">请选择电池要求</option>
+                  {options.battery_requires.map(b => <option key={b} value={b}>{b}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>故障描述</label>
+                <input style={inputStyle('故障描述')} value={editFormData.故障描述 || ''} onChange={e => handleEditFormChange('故障描述', e.target.value)} />
+              </div>
+              <div style={{ gridColumn: '1 / -1' }}>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>备注</label>
+                <textarea style={{ width: '100%', minHeight: '80px', padding: '8px', border: '1px solid #ddd', borderRadius: '4px', fontSize: '13px', resize: 'vertical' }} value={editFormData.备注 || ''} onChange={e => handleEditFormChange('备注', e.target.value)} placeholder="请输入备注信息" />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>返厂快递</label>
+                <select style={inputStyle('返厂快递')} value={editFormData.返厂快递 || ''} onChange={e => handleEditFormChange('返厂快递', e.target.value)}>
+                  <option value="">请选择快递</option>
+                  {options.couriers.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>返厂单号</label>
+                <input style={inputStyle('返厂单号')} value={editFormData.返厂单号 || ''} onChange={e => handleEditFormChange('返厂单号', formatOrderNo(e.target.value))} placeholder="只能输入字母和数字" />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>寄回快递</label>
+                <select style={{ ...inputStyle('寄回快递'), background: editingRecord?.状态 !== '已完成' && editingRecord?.支付凭证 !== '拒维修' ? '#f0f0f0' : undefined, cursor: editingRecord?.状态 !== '已完成' && editingRecord?.支付凭证 !== '拒维修' ? 'not-allowed' : undefined }} value={editFormData.寄回快递 || ''} onChange={e => handleEditFormChange('寄回快递', e.target.value)} disabled={editingRecord?.状态 !== '已完成' && editingRecord?.支付凭证 !== '拒维修'}>
+                  <option value="">请选择快递</option>
+                  {options.couriers.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>寄回单号</label>
+                <input style={{ ...inputStyle('寄回单号'), background: editingRecord?.状态 !== '已完成' && editingRecord?.支付凭证 !== '拒维修' ? '#f0f0f0' : undefined, cursor: editingRecord?.状态 !== '已完成' && editingRecord?.支付凭证 !== '拒维修' ? 'not-allowed' : undefined }} value={editFormData.寄回单号 || ''} onChange={e => handleEditFormChange('寄回单号', formatOrderNo(e.target.value))} placeholder="只能输入字母和数字" disabled={editingRecord?.状态 !== '已完成' && editingRecord?.支付凭证 !== '拒维修'} />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>登记人</label>
+                <input style={{ ...inputStyle('登记人'), background: '#f5f5f5', color: '#666' }} value={editFormData.登记人 || ''} readOnly />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>报修平台</label>
+                <select style={inputStyle('报修平台')} value={editFormData.报修平台 || ''} onChange={e => handleEditFormChange('报修平台', e.target.value)}>
+                  <option value="">请选择报修平台</option>
+                  {options.repair_platforms.map(p => <option key={p} value={p}>{p}</option>)}
+                </select>
+              </div>
+            </div>
+
+              <div style={{ marginTop: '12px' }}>
+                <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', fontSize: '13px', color: '#333' }}>附件上传（可上传图片、视频、PDF）</label>
+                {/* 合并显示已有附件、新选附件和上传按钮 */}
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '8px', marginBottom: '8px' }}>
+                  {/* 已上传的附件缩略图 */}
+                  {attachments[editingRecord?.维修单号] && Array.isArray(attachments[editingRecord.维修单号]) && attachments[editingRecord.维修单号].filter(a => a.file_type !== 'barcode_photo').map(att => {
+                    const attType = getAttachmentType(att.mime_type);
+                    const url = getImageUrl(att.file_path);
+                    const isPending = att.status === 'pending';
+                    return (
+                      <div key={att.id} style={{ position: 'relative', width: '60px', height: '60px', border: '1px solid #ddd', borderRadius: '4px', overflow: 'hidden' }}>
+                        {attType === 'image' && url && (
+                          <img 
+                            src={url} 
+                            alt={att.original_name || '附件'} 
+                            style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer', opacity: isPending ? 0.6 : 1 }}
+                            onClick={() => { setPreviewUrl(url); setPreviewType('image'); setShowPreviewModal(true); }}
+                            onError={(e) => { e.target.style.display = 'none'; }}
+                          />
+                        )}
+                        {attType === 'video' && url && (
+                          <div 
+                            onClick={() => { setPreviewUrl(url); setPreviewType('video'); setShowPreviewModal(true); }}
+                            style={{ width: '100%', height: '100%', cursor: 'pointer', position: 'relative', background: '#000' }}
+                          >
+                            <video src={url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                            <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', fontSize: '18px', color: '#fff', textShadow: '0 0 4px rgba(0,0,0,0.8)' }}>▶</div>
+                          </div>
+                        )}
+                        {attType === 'other' && (
+                          <div 
+                            onClick={() => window.open(url, '_blank')}
+                            style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', fontSize: '9px', color: '#666', padding: '2px', cursor: 'pointer' }}
+                            title={att.original_name || '点击打开'}
+                          >
+                            <span style={{ fontSize: '20px' }}>📄</span>
+                            <span style={{ marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '100%' }}>文件</span>
+                          </div>
+                        )}
+                        {isPending && (
+                          <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(255, 152, 0, 0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                            <span style={{ color: '#fff', fontWeight: 'bold', fontSize: '9px' }}>审核中</span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {/* 新上传的附件缩略图 */}
+                  {editFilePreviews.map((item, idx) => (
+                    <div key={idx} style={{ position: 'relative', width: '60px', height: '60px', border: '1px solid #ddd', borderRadius: '4px', overflow: 'hidden' }}>
+                      {item.preview ? (
+                        item.type.startsWith('video/') ? (
+                          <div style={{ width: '100%', height: '100%', cursor: 'pointer', position: 'relative' }}>
+                            <video src={item.preview} style={{ width: '100%', height: '100%', objectFit: 'cover' }} controls />
+                          </div>
+                        ) : (
+                          <div style={{ width: '100%', height: '100%', cursor: 'pointer' }}>
+                            <img src={item.preview} alt={item.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                          </div>
+                        )
+                      ) : (
+                        <span style={{ position: 'absolute', bottom: '2px', left: '2px', right: '2px', fontSize: '9px', color: '#fff', background: 'rgba(0,0,0,0.5)', textAlign: 'center', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>{item.name}</span>
+                      )}
+                      <button 
+                        onClick={() => {
+                          const newFiles = editSelectedFiles.filter((_, i) => i !== idx);
+                          const newPreviews = editFilePreviews.filter((_, i) => i !== idx);
+                          setEditSelectedFiles(newFiles);
+                          setEditFilePreviews(newPreviews);
+                        }}
+                        style={{ position: 'absolute', top: '2px', right: '2px', width: '18px', height: '18px', padding: '0', fontSize: '12px', background: '#f44336', color: '#fff', border: 'none', borderRadius: '50%', cursor: 'pointer', lineHeight: '1', zIndex: 1 }}
+                      >×</button>
+                    </div>
+                  ))}
+                  {/* 上传按钮 */}
+                  <label style={{ width: '60px', height: '60px', border: '2px dashed #4caf50', borderRadius: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', fontSize: '32px', color: '#4caf50', background: '#f9f9f9' }}>
+                    +
+                    <input type="file" multiple accept="image/*,video/*,.pdf" onChange={handleEditFileChange} style={{ display: 'none' }} />
+                  </label>
+                  <span
+                    contentEditable
+                    suppressContentEditableWarning
+                    onPaste={(e) => {
+                      handleContainerPaste(e, (f) => { setEditSelectedFiles(prev => [...prev, f]); setEditFilePreviews(prev => [...prev, { file: f, preview: URL.createObjectURL(f), name: f.name, type: f.type }]); });
+                    }}
+                    onBeforeInput={(e) => e.preventDefault()}
+                    onKeyDown={(e) => { if (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete') e.preventDefault(); }}
+                    onInput={(e) => { e.target.textContent = ''; }}
+                    style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '85px', height: '28px', fontSize: '11px', border: '1px dashed #1976d2', borderRadius: '4px', padding: '0 4px', outline: 'none', cursor: 'default', background: '#f0f7ff', color: '#1976d2', boxSizing: 'border-box', alignSelf: 'center', caretColor: 'transparent' }}
+                  >📋 右键粘贴</span>
+                </div>
+              </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '16px' }}>
+              <button onClick={handleEditSubmit} style={{ padding: '8px 20px', background: '#4caf50', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '14px' }}>
+                提交修改
+              </button>
+              <button onClick={() => { setShowEditModal(false); setEditSelectedFiles([]); setEditFilePreviews([]); }} style={{ padding: '8px 20px', background: '#9e9e9e', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '14px' }}>
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+    </>
+  );
+}
+
+export default MaintenanceRegistration;

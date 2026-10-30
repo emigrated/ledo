@@ -1,0 +1,112 @@
+const express = require("express");
+const router = express.Router();
+const { pool } = require('../config/database');
+const { logger } = require('../utils/logger');
+const { authenticate } = require('../middleware/auth');
+
+router.use(authenticate);
+
+// 仪表盘聚合统计：一次返回控制台所需的全部看板数据
+router.get('/stats', async (req, res) => {
+  try {
+    const user = req.user || {};
+    const isAdmin = user.role === 'admin';
+    // 访问控制 SQL 片段：非管理员仅统计 operator=自己 的单，拼接处空格必不可少
+    const p = isAdmin ? [] : [user.name];
+    const cLeading = isAdmin ? '' : ' WHERE operator = ? ';
+    const cWhereAnd = isAdmin ? 'WHERE ' : 'WHERE operator = ? AND ';
+    const cAnd = isAdmin ? '' : ' AND operator = ? ';
+
+    const monthStart = "DATE_FORMAT(CURDATE(), '%Y-%m-01')";
+    const prevMonthStart = "DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01')";
+
+    const [
+      [statusRows], [paymentRows], [platformRows], [trendRows],
+      [monthRepairRows],
+      [reasonRows], [warrantyRows], [modelTopRows],
+      [orderTotalRows], [monthOrderRows], [prevMonthOrderRows], [orderBrandRows],
+      [productRows]
+    ] = await Promise.all([
+      pool.query(`SELECT status, COUNT(*) c FROM maintenance ${cLeading}GROUP BY status`, p),
+      pool.query(`SELECT payment_status, COUNT(*) c FROM maintenance ${cWhereAnd}payment_status IS NOT NULL AND payment_status != '' GROUP BY payment_status`, p),
+      pool.query(`SELECT repair_platform, COUNT(*) c FROM maintenance ${cWhereAnd}repair_platform IS NOT NULL AND repair_platform != '' GROUP BY repair_platform ORDER BY c DESC`, p),
+      pool.query(`SELECT DATE_FORMAT(created_at, '%Y-%m') ym, COUNT(*) c FROM maintenance WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH) ${cAnd}GROUP BY ym ORDER BY ym`, p),
+      pool.query(`SELECT DATE_FORMAT(created_at, '%Y-%m') ym, COUNT(*) c FROM maintenance WHERE created_at >= ${prevMonthStart} ${cAnd}GROUP BY ym ORDER BY ym`, p),
+      pool.query(`SELECT return_reason, COUNT(*) c FROM maintenance ${cWhereAnd}return_reason IS NOT NULL AND return_reason != '' GROUP BY return_reason ORDER BY c DESC`, p),
+      pool.query(`SELECT warranty_status, COUNT(*) c FROM maintenance ${cWhereAnd}warranty_status IS NOT NULL AND warranty_status != '' GROUP BY warranty_status ORDER BY c DESC`, p),
+      pool.query(`SELECT model, COUNT(*) c FROM maintenance ${cLeading}GROUP BY model ORDER BY c DESC LIMIT 6`, p),
+      // 订单统计（仅管理员）
+      isAdmin ? pool.query('SELECT COUNT(*) total, SUM(价格 * 购买件数) amount FROM orders') : Promise.resolve([[{ total: 0, amount: 0 }]]),
+      isAdmin ? pool.query(`SELECT COUNT(*) c, SUM(价格 * 购买件数) amount FROM orders WHERE 创建时间 >= ${monthStart}`) : Promise.resolve([[{ c: 0, amount: 0 }]]),
+      isAdmin ? pool.query(`SELECT COUNT(*) c, SUM(价格 * 购买件数) amount FROM orders WHERE 创建时间 >= ${prevMonthStart} AND 创建时间 < ${monthStart}`) : Promise.resolve([[{ c: 0, amount: 0 }]]),
+      isAdmin ? pool.query('SELECT 品牌, COUNT(*) c, SUM(价格 * 购买件数) amt FROM orders GROUP BY 品牌 ORDER BY c DESC') : Promise.resolve([[]]),
+      // 产品规模（仅管理员）
+      isAdmin ? pool.query('SELECT COUNT(*) total, COUNT(DISTINCT brand) brands FROM product_data') : Promise.resolve([[{ total: 0, brands: 0 }]])
+    ]);
+
+    // ---- 维修 KPI ----
+    const statusMap = {};
+    let maintenanceTotal = 0;
+    statusRows.forEach(r => { statusMap[r.status] = r.c; maintenanceTotal += r.c; });
+
+    const monthRepair = {};
+    monthRepairRows.forEach(r => { monthRepair[r.ym] = r.c; });
+    const fmtYm = (dt) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`;
+    const curYm = fmtYm(new Date());
+    const prevYm = fmtYm(new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1));
+    const monthRepairCount = monthRepair[curYm] || 0;
+    const prevMonthRepairCount = monthRepair[prevYm] || 0;
+    const repairGrowth = prevMonthRepairCount > 0 ? (monthRepairCount - prevMonthRepairCount) / prevMonthRepairCount : (monthRepairCount > 0 ? 1 : 0);
+
+    // ---- 近12月趋势（补零）----
+    const monthSet = new Set(trendRows.map(r => r.ym));
+    const trend = [];
+    const now = new Date();
+    for (let i = 11; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      trend.push({ ym, count: monthSet.has(ym) ? trendRows.find(r => r.ym === ym).c : 0 });
+    }
+
+    // ---- 状态分布（带颜色由前端决定，保证顺序）----
+    const statusOrder = ['待处理', '维修中', '已完成', '已退回'];
+    const statusDist = statusOrder.filter(s => statusMap[s]).map(s => ({ name: s, count: statusMap[s] }));
+
+    const warrantyTotal = warrantyRows.reduce((a, r) => a + r.c, 0);
+
+    res.json({
+      kpi: {
+        maintenanceTotal,
+        pendingCount: statusMap['待处理'] || 0,
+        processingCount: statusMap['维修中'] || 0,
+        doneCount: statusMap['已完成'] || 0,
+        monthRepairCount,
+        prevMonthRepairCount,
+        repairGrowth: Math.round(repairGrowth * 100),
+        monthOrders: isAdmin ? (monthOrderRows[0].c || 0) : null,
+        monthOrderAmount: isAdmin ? Number(monthOrderRows[0].amount || 0) : null,
+        prevMonthOrders: isAdmin ? (prevMonthOrderRows[0].c || 0) : null,
+        prevMonthOrderAmount: isAdmin ? Number(prevMonthOrderRows[0].amount || 0) : null,
+        orderTotal: isAdmin ? (orderTotalRows[0].total || 0) : null,
+        orderTotalAmount: isAdmin ? Number(orderTotalRows[0].amount || 0) : null,
+        productTotal: isAdmin ? (productRows[0].total || 0) : null,
+        brandCount: isAdmin ? (productRows[0].brands || 0) : null,
+        outWarrantyCount: warrantyRows.find(r => r.warranty_status === '已过质保期')?.c || 0,
+        warrantyTotal
+      },
+      statusDist,
+      paymentDist: paymentRows.map(r => ({ name: r.payment_status, count: r.c })),
+      platformDist: platformRows.map(r => ({ name: r.repair_platform, count: r.c })),
+      trend,
+      modelTop: modelTopRows.map(r => ({ name: r.model, count: r.c })),
+      reasonDist: reasonRows.map(r => ({ name: r.return_reason, count: r.c })),
+      warrantyDist: warrantyRows.map(r => ({ name: r.warranty_status, count: r.c })),
+      orderBrandDist: isAdmin ? orderBrandRows.map(r => ({ name: r['品牌'], count: r.c, amount: Number(r.amt || 0) })) : []
+    });
+  } catch (error) {
+    logger.error('Dashboard stats error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+module.exports = router;

@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>企业内部系统</title>
+    <script>
+      // 在页面加载前应用字体大小设置，防止闪烁
+      (function() {
+        try {
+          const savedSettings = localStorage.getItem('userSettings');
+          let fontSize = 100;
+          
+          if (savedSettings) {
+            const parsed = JSON.parse(savedSettings);
+            fontSize = parsed.font_size || 100;
+          }
+          
+          const baseFontSize = 14;
+          const scale = fontSize / 100;
+          const newBaseSize = baseFontSize * scale;
+          
+          // 直接设置 font-size，不使用 CSS 变量
+          document.documentElement.style.fontSize = `${newBaseSize}px`;
+          // body 可能在 head 之后还未加载，使用 setTimeout 确保 body 存在
+          setTimeout(() => {
+            if (document.body) {
+              document.body.style.fontSize = `${newBaseSize}px`;
+            }
+          }, 0);
+        } catch (e) {
+          console.error('Failed to apply font size:', e);
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

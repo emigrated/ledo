@@ -1,0 +1,313 @@
+const express = require('express');
+const router = express.Router();
+const { pool } = require('../config/database');
+const path = require('path');
+const fs = require('fs');
+const multer = require('multer');
+
+const uploadDir = path.join(__dirname, '../../uploads/maintenance');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueName = Date.now() + '-' + Math.round(Math.random() * 1E9) + path.extname(file.originalname);
+    cb(null, uniqueName);
+  }
+});
+
+const upload = multer({ storage });
+
+const fieldMap = {
+  '维修单号': 'id',
+  '创建时间': 'created_at',
+  '省份': 'province',
+  '省份adcode': 'province_adcode',
+  '城市': 'city',
+  '城市adcode': 'city_adcode',
+  '区县': 'district',
+  '区县adcode': 'district_adcode',
+  '镇街道': 'street',
+  '镇街道adcode': 'street_adcode',
+  '详细地址': 'address',
+  '联系人': 'contact',
+  '联系电话': 'phone',
+  '品牌': 'brand',
+  '型号': 'model',
+  '类型': 'type',
+  '颜色': 'color',
+  '电池要求': 'battery_require',
+  '设备条码': 'device_sn',
+  '购买日期': 'purchase_date',
+  '购买平台': 'purchase_platform',
+  '订单编号': 'order_no',
+  '保修状态': 'warranty_status',
+  '返厂原因': 'return_reason',
+  '故障描述': 'fault_desc',
+  '返厂快递': 'return_courier',
+  '返厂单号': 'return_tracking_no',
+  '寄回快递': 'send_back_courier',
+  '寄回单号': 'send_back_tracking_no',
+  '完成时间': 'completion_time',
+  '操作人': 'operator',
+  '登记人': 'registrant',
+  '状态': 'status',
+  '报修平台': 'repair_platform'
+};
+
+function mapRowFromChinese(row) {
+  if (!row) return row;
+  const result = {};
+  for (const [key, value] of Object.entries(row)) {
+    const en = fieldMap[key] || key;
+    result[en] = value;
+  }
+  return result;
+}
+
+function mapRowToChinese(row) {
+  if (!row) return row;
+  const result = {};
+  const reverseMap = {};
+  for (const [cn, en] of Object.entries(fieldMap)) {
+    reverseMap[en] = cn;
+  }
+  for (const [key, value] of Object.entries(row)) {
+    const cn = reverseMap[key] || key;
+    if (Buffer.isBuffer(value)) {
+      result[cn] = value.toString('utf8');
+    } else if (value instanceof Date) {
+      const y = value.getFullYear();
+      const M = String(value.getMonth() + 1).padStart(2, '0');
+      const D = String(value.getDate()).padStart(2, '0');
+      const h = String(value.getHours()).padStart(2, '0');
+      const m = String(value.getMinutes()).padStart(2, '0');
+      const s = String(value.getSeconds()).padStart(2, '0');
+      result[cn] = `${y}-${M}-${D} ${h}:${m}:${s}`;
+    } else {
+      result[cn] = value;
+    }
+  }
+  return result;
+}
+
+// 获取产品选项（品牌、型号等）
+router.get('/options', async (req, res) => {
+  try {
+    const [brands] = await pool.execute('SELECT DISTINCT brand FROM product_data WHERE brand IS NOT NULL AND brand != "" ORDER BY brand');
+    const [models] = await pool.execute('SELECT DISTINCT model FROM product_data WHERE model IS NOT NULL AND model != "" ORDER BY model');
+    const [types] = await pool.execute('SELECT DISTINCT type FROM product_data WHERE type IS NOT NULL AND type != "" ORDER BY type');
+    const [colors] = await pool.execute('SELECT DISTINCT color FROM product_data WHERE color IS NOT NULL AND color != "" ORDER BY color');
+    const [specs] = await pool.execute('SELECT DISTINCT spec FROM product_data WHERE spec IS NOT NULL AND spec != "" ORDER BY spec');
+
+    // 获取其他选项
+    const [platforms] = await pool.execute('SELECT DISTINCT value FROM options WHERE category = "platform" ORDER BY value');
+    const [warehouses] = await pool.execute('SELECT DISTINCT value FROM options WHERE category = "warehouse" ORDER BY value');
+    const [reasons] = await pool.execute('SELECT DISTINCT value FROM options WHERE category = "reason" ORDER BY value');
+    const [statuses] = await pool.execute('SELECT DISTINCT value FROM options WHERE category = "status" ORDER BY value');
+    const [couriers] = await pool.execute('SELECT DISTINCT value FROM options WHERE category = "courier" ORDER BY value');
+    const [batteryRequires] = await pool.execute('SELECT DISTINCT value FROM options WHERE category = "battery_require" ORDER BY value');
+    const [repairPlatforms] = await pool.execute('SELECT DISTINCT value FROM options WHERE category = "repair_platform" ORDER BY value');
+    const [returnReasons] = await pool.execute('SELECT DISTINCT value FROM options WHERE category = "return_reason" ORDER BY value');
+
+    res.json({
+      brands: brands.map(r => r.brand),
+      models: models.map(r => r.model),
+      types: types.map(r => r.type),
+      colors: colors.map(r => r.color),
+      specs: specs.map(r => r.spec),
+      platforms: platforms.map(r => r.value),
+      warehouses: warehouses.map(r => r.value),
+      reasons: reasons.map(r => r.value),
+      statuses: statuses.map(r => r.value),
+      couriers: couriers.map(r => r.value),
+      battery_requires: batteryRequires.map(r => r.value),
+      repair_platforms: repairPlatforms.map(r => r.value),
+      return_reasons: returnReasons.map(r => r.value)
+    });
+  } catch (error) {
+    console.error('Get public options error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 提交维修记录（公开接口）
+router.post('/submit', async (req, res) => {
+  const body = req.body || {};
+  const dbData = mapRowFromChinese(body);
+  
+  // 自动生成维修单号
+  if (!dbData.id) {
+    const timestamp = Date.now().toString().slice(-6);
+    const random = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+    dbData.id = `WX${timestamp}${random}`;
+  }
+  
+  // 状态默认为"待处理"
+  if (!dbData.status) {
+    dbData.status = '待处理';
+  }
+  
+  const columns = [];
+  const placeholders = [];
+  const values = [];
+
+  for (const [key, value] of Object.entries(dbData)) {
+    if (value !== undefined && value !== null && value !== '') {
+      columns.push('`' + key + '`');
+      placeholders.push('?');
+      values.push(value);
+    }
+  }
+
+  if (columns.length === 0) {
+    return res.status(400).json({ error: 'No valid fields provided' });
+  }
+
+  const sql = `INSERT INTO maintenance (${columns.join(', ')}) VALUES (${placeholders.join(', ')})`;
+
+  try {
+    const [result] = await pool.query(sql, values);
+
+    let created = null;
+    const [rows] = await pool.query('SELECT * FROM maintenance WHERE id = ?', [dbData.id]);
+    created = rows[0] ? mapRowToChinese(rows[0]) : null;
+
+    if (created) {
+      res.status(201).json(created);
+    } else {
+      res.status(201).json({ insertedId: result.insertId, id: dbData.id });
+    }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error', detail: err.message });
+  }
+});
+
+// 上传附件（公开接口）
+router.post('/attachments/:id', upload.single('file'), async (req, res) => {
+  const maintenanceId = req.params.id;
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file uploaded' });
+  }
+  
+  const fileType = req.body.file_type || 'attachment';
+  const status = req.body.status || 'approved'; // 公开提交的附件默认为approved
+  const uploadedBy = req.body.uploaded_by || 'guest';
+  
+  const sql = `
+    INSERT INTO maintenance_attachments 
+    (maintenance_id, filename, original_name, mime_type, file_size, file_path, file_type, status, uploaded_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `;
+  
+  try {
+    const relativePath = '/uploads/maintenance/' + req.file.filename;
+    const [result] = await pool.query(sql, [
+      maintenanceId,
+      req.file.filename,
+      req.file.originalname,
+      req.file.mimetype,
+      req.file.size,
+      relativePath,
+      fileType,
+      status,
+      uploadedBy
+    ]);
+    
+    const [rows] = await pool.query('SELECT * FROM maintenance_attachments WHERE id = ?', [result.insertId]);
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error', detail: err.message });
+  }
+});
+
+// 获取维修记录列表（公开接口）
+router.get('/records', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM maintenance ORDER BY created_at DESC');
+    const mappedRows = rows.map(row => mapRowToChinese(row));
+    res.json(mappedRows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error', detail: err.message });
+  }
+});
+
+// 获取维修记录附件（公开接口）
+router.get('/attachments/:id', async (req, res) => {
+  const maintenanceId = req.params.id;
+  try {
+    const [rows] = await pool.query('SELECT * FROM maintenance_attachments WHERE maintenance_id = ?', [maintenanceId]);
+    res.json({ attachments: rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error', detail: err.message });
+  }
+});
+
+// 更新维修记录（公开接口 - 用于分享页面提交寄回信息）
+router.put('/update/:id', async (req, res) => {
+  const maintenanceId = req.params.id;
+  const body = req.body || {};
+  
+  console.log('Update request received:', { maintenanceId, body });
+  
+  const dbData = mapRowFromChinese(body);
+  
+  // If status is changing to '已完成', auto-set completion_time and operator server-side
+  if (dbData.status === '已完成') {
+    dbData.completion_time = new Date();
+    dbData.operator = '售后部';
+  }
+  
+  console.log('Mapped data:', dbData);
+  
+  // 只允许更新特定字段
+  const allowedFields = ['send_back_courier', 'send_back_tracking_no', 'status', 'completion_time', 'operator'];
+  const updateData = {};
+  
+  for (const field of allowedFields) {
+    if (dbData[field] !== undefined) {
+      updateData[field] = dbData[field];
+    }
+  }
+  
+  console.log('Update data:', updateData);
+  
+  if (Object.keys(updateData).length === 0) {
+    return res.status(400).json({ error: 'No valid fields to update' });
+  }
+  
+  const setClauses = [];
+  const values = [];
+  
+  for (const [key, value] of Object.entries(updateData)) {
+    setClauses.push(`\`${key}\` = ?`);
+    values.push(value);
+  }
+  
+  values.push(maintenanceId);
+  
+  const sql = `UPDATE maintenance SET ${setClauses.join(', ')} WHERE id = ?`;
+  
+  console.log('SQL:', sql, 'Values:', values);
+  
+  try {
+    await pool.query(sql, values);
+    const [rows] = await pool.query('SELECT * FROM maintenance WHERE id = ?', [maintenanceId]);
+    const updated = rows[0] ? mapRowToChinese(rows[0]) : null;
+    console.log('Updated record:', updated);
+    res.json(updated || { success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error', detail: err.message });
+  }
+});
+
+module.exports = router;
