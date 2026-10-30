@@ -87,6 +87,15 @@ node_modules/app-builder-lib/out/targets/nsis/NsisTarget.js
 ```
 
 改完重跑一次 `electron-builder --win --x64` 即可。
+
+这个改动已经脚本化：**`scripts/patch-nsis-no-wine.sh`**（在仓库里）。用法：
+
+```bash
+docker run --rm -v <构建目录>:/app -v /path/to/scripts/patch-nsis-no-wine.sh:/patch.sh \
+  node:22-bookworm-slim bash /patch.sh
+```
+
+（脚本里用的是 `node`，不是 python —— Debian 版 node 镜像没装 python。）
 （另注：在 macOS 上直接跑 `--win` 理论上连补丁都不用，因为走的是 UninstallerReader 分支 —— 尚未实测。）
 
 ## 三、打包步骤
