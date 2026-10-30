@@ -1047,6 +1047,19 @@ function ReturnRegistration({ userRole, isMobile = false }) {
     setPreviewType('');
   };
 
+  // 修改记录里不展示的字段：行政区划编码/主键之类，纯技术字段
+  const HIDDEN_CHANGE_KEY_RE = /(^id$|adcode$|_?code$|编码$)/i;
+  // 修改记录的字段展示顺序：地址按 省→市→区→镇→详细 逐级展开，与编辑弹窗一致
+  const CHANGE_FIELD_ORDER = [
+    '订单编号', '客户信息', '购买日期', '购买平台', '品牌', '型号', '类型', '颜色', '规格',
+    '原因', '状态', '快递', '单号', '备注', '价格', '仓库', '平台', '运费',
+    '购买件数', '退货件数', '省份', '城市', '区县', '镇街道', '详细地址', '联系人', '联系电话'
+  ];
+  const changeFieldRank = (key) => {
+    const i = CHANGE_FIELD_ORDER.indexOf(key);
+    return i === -1 ? CHANGE_FIELD_ORDER.length : i;
+  };
+
   // 结算徽标：红=已录金额待分发凭证，绿=金额与凭证齐全，橙=未结算
   const hasSettleAmount = (r) => !!(r && r.结算金额 !== null && r.结算金额 !== undefined && r.结算金额 !== '' && Number(r.结算金额) > 0);
   const hasSettleProof = (r) => !!(r && r.settlement_proof_url && String(r.settlement_proof_url).trim());
@@ -1931,12 +1944,16 @@ function ReturnRegistration({ userRole, isMobile = false }) {
                                     if (parsed && typeof parsed === 'object') {
                                       changes = Object.entries(parsed)
                                         .filter(([k]) => k !== 'ID')
+                                        // 行政区划编码（省份adcode 等）不展示
+                                        .filter(([k]) => !HIDDEN_CHANGE_KEY_RE.test(k))
                                         .filter(([k, v]) => {
                                           if (typeof v === 'object' && v !== null) {
                                             return false;
                                           }
                                           return true;
-                                        });
+                                        })
+                                        // 地址按 省→市→区→镇→详细 逐级展开，其余按表单顺序
+                                        .sort((a, b) => changeFieldRank(a[0]) - changeFieldRank(b[0]));
                                     }
                                   } catch (e) {
                                     changes = [];

@@ -1322,6 +1322,20 @@ function MaintenanceRegistration({ isMobile = false }) {
   };
 
 
+  // 修改记录里不展示的字段：行政区划编码/主键之类，纯技术字段
+  const HIDDEN_CHANGE_KEY_RE = /(^id$|adcode$|_?code$|编码$)/i;
+  // 修改记录的字段展示顺序：与编辑弹窗自上而下一致，地址按 省→市→区→镇→详细 逐级展开
+  const CHANGE_FIELD_ORDER = [
+    '订单编号', '购买日期', '品牌', '型号', '类型', '颜色', '规格',
+    '电池要求', '保修状态', '报修平台',
+    '省份', '城市', '区县', '镇街道', '详细地址', '联系人', '联系电话',
+    '返厂原因', '故障描述', '返厂快递', '返厂单号', '备注', '登记人'
+  ];
+  const changeFieldRank = (key) => {
+    const i = CHANGE_FIELD_ORDER.indexOf(key);
+    return i === -1 ? CHANGE_FIELD_ORDER.length : i;
+  };
+
   // 修改记录（维修模块）：展示谁在什么时候把哪个字段从什么改成了什么
   const renderChangeHistory = (rec, isMobileView) => {
     const rawList = changeHistory[rec.维修单号];
@@ -1356,9 +1370,11 @@ function MaintenanceRegistration({ isMobile = false }) {
           let changes = [];
           try {
             const parsed = typeof cr.changed_fields === 'string' ? JSON.parse(cr.changed_fields) : (cr.changed_fields || {});
-            changes = Object.entries(parsed).filter(([k, v]) =>
-              k !== 'requested_by' && v && typeof v === 'object' && ('old' in v || 'new' in v)
-            );
+            changes = Object.entries(parsed)
+              .filter(([k, v]) => k !== 'requested_by' && v && typeof v === 'object' && ('old' in v || 'new' in v))
+              // 行政区划编码（省份adcode 等）是给级联下拉用的，展示出来只是噪音
+              .filter(([k]) => !HIDDEN_CHANGE_KEY_RE.test(k))
+              .sort((a, b) => changeFieldRank(a[0]) - changeFieldRank(b[0]));
           } catch (e) {
             changes = [];
           }
@@ -1388,7 +1404,7 @@ function MaintenanceRegistration({ isMobile = false }) {
                   <span style={{ color: '#2e7d32', fontWeight: 'bold', maxWidth: '100%', wordBreak: 'break-all' }}>{fmtVal(val.new)}</span>
                 </div>
               )) : (
-                <span style={{ color: '#999' }}>{cr.change_reason || '无字段变更（仅上传附件）'}</span>
+                <span style={{ color: '#999' }}>{cr.change_reason || '无可见字段变更（可能仅调整了附件或地址编码）'}</span>
               )}
             </div>
           );
