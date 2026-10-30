@@ -6,7 +6,29 @@ import Pagination from '../components/Pagination';
 import { fmtTime, fmtDate } from '../utils/time';
 import { copyToClipboard } from '../utils/clipboard';
 import { applyTableLabels } from '../utils/responsiveTable';
+import { saveDraft, readDraft, clearDraft, fmtDraftStamp } from '../utils/draft';
 const PAGE_SIZE = 20;
+
+// 维修登记草稿：手机切到别的 APP 时后台页面可能被系统回收，切回来会整页重载、
+// React 状态全丢。这里把已填内容落盘，回来自动恢复。附件图片无法存草稿，需重新上传。
+const MAINT_DRAFT_KEY = 'maintenanceRegistrationDraft';
+
+const emptyMaintenanceForm = (userName = '') => ({
+  维修单号: '',
+  省份: '', 省份adcode: '', 城市: '', 城市adcode: '', 区县: '', 区县adcode: '', 镇街道: '', 镇街道adcode: '', 详细地址: '',
+  联系人: '', 联系电话: '',
+  品牌: '', 型号: '', 类型: '', 颜色: '',
+  电池要求: '', 购买日期: '', 购买平台: '',
+  订单编号: '', 保修状态: '已过质保期', 返厂原因: '', 故障描述: '',
+  返厂快递: '', 返厂单号: '', 寄回快递: '', 寄回单号: '',
+  登记人: userName, 状态: '待处理', 报修平台: '', 备注: ''
+});
+
+// 这几个字段每次打开表单都有值，判断"是否真的填过东西"时要排除
+const DRAFT_BASE_FIELDS = ['维修单号', '登记人', '状态', '保修状态'];
+const draftHasContent = (data) => Object.entries(data || {}).some(
+  ([key, value]) => !DRAFT_BASE_FIELDS.includes(key) && String(value ?? '').trim() !== ''
+);
 
 function MaintenanceRegistration({ isMobile = false }) {
   const user = JSON.parse(localStorage.getItem('user') || '{}');
@@ -18,6 +40,10 @@ function MaintenanceRegistration({ isMobile = false }) {
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [showForm, setShowForm] = useState(false);
+  // 草稿：draftMeta 有值说明当前表单内容是从草稿恢复的，用于顶部提示
+  const [draftMeta, setDraftMeta] = useState(null);
+  const [hasDraft, setHasDraft] = useState(false);
+  const [draftReady, setDraftReady] = useState(false);
   const [expandedRows, setExpandedRows] = useState({});
   const [search, setSearch] = useState('');
   
@@ -470,9 +496,40 @@ function MaintenanceRegistration({ isMobile = false }) {
 
   useEffect(() => {
     fetchRecords();
-    fetchOptions();
-    fetchProvinces();
+    let cancelled = false;
+    // 顺序很重要：先把基础选项和省份列表取回来，再恢复草稿里的级联下拉，
+    // 否则 fetchOptions/fetchProvinces 的 setState 会把恢复出来的选项覆盖成空。
+    (async () => {
+      try {
+        await fetchOptions();
+      } catch (err) {
+        console.error('加载选项失败', err);
+      }
+      try {
+        await fetchProvinces();
+      } catch (err) {
+        console.error('加载省份失败', err);
+      }
+      if (!cancelled) await tryRestoreDraft();
+    })();
+    return () => { cancelled = true; };
   }, []);
+
+  // 草稿自动保存：输入变化 400ms 后落盘（同时记录表单是否开着）
+  useEffect(() => {
+    if (!draftReady) return;
+    const timer = setTimeout(() => {
+      if (!draftHasContent(formData)) {
+        clearDraft(MAINT_DRAFT_KEY);
+        setHasDraft(false);
+        return;
+      }
+      if (saveDraft(MAINT_DRAFT_KEY, { formData, smartPasteText, modalOpen: showForm })) {
+        setHasDraft(true);
+      }
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [formData, smartPasteText, showForm, draftReady]);
 
   useEffect(() => {
     if (isMobile) {
@@ -517,6 +574,111 @@ function MaintenanceRegistration({ isMobile = false }) {
     } catch (err) {
       console.error('获取级联选项失败', err);
     }
+  };
+
+  // 恢复草稿里的级联下拉（品牌→型号→类型→颜色→规格）：只恢复表单值是不够的，
+  // 下拉列表刷新后是空的，用户一改选项后面的值就没了。
+  const restoreProductOptions = async (d) => {
+    try {
+      if (!d.品牌) return;
+      const modelsRes = await api.get(`/product-data/models?brand=${encodeURIComponent(d.品牌)}`);
+      setOptions(prev => ({ ...prev, models: modelsRes.data?.models || [] }));
+      if (!d.型号) return;
+
+      const typesRes = await api.get(`/product-data/types?brand=${encodeURIComponent(d.品牌)}&model=${encodeURIComponent(d.型号)}`);
+      setOptions(prev => ({ ...prev, types: typesRes.data?.types || [] }));
+      if (!d.类型) return;
+
+      const colorsRes = await api.get(`/product-data/colors?brand=${encodeURIComponent(d.品牌)}&model=${encodeURIComponent(d.型号)}&type=${encodeURIComponent(d.类型)}`);
+      setOptions(prev => ({ ...prev, colors: colorsRes.data?.colors || [] }));
+      if (!d.颜色) return;
+
+      const specsRes = await api.get(`/product-data/specs?brand=${encodeURIComponent(d.品牌)}&model=${encodeURIComponent(d.型号)}&type=${encodeURIComponent(d.类型)}&color=${encodeURIComponent(d.颜色)}`);
+      setOptions(prev => ({ ...prev, specs: specsRes.data?.specs || [] }));
+    } catch (err) {
+      console.error('恢复草稿产品选项失败', err);
+    }
+  };
+
+  // 恢复草稿里的省/市/区/镇下拉：按草稿里存的 adcode 逐级重拉
+  const restoreAddressOptions = async (d) => {
+    try {
+      if (!d.省份adcode) return;
+      const citiesRes = await api.get(`/districts?adcode=${d.省份adcode}`);
+      if (citiesRes.data?.status !== '1') return;
+      const cities = citiesRes.data.districts || [];
+      setAddressOptions(prev => ({ ...prev, cities, districts: [], towns: [] }));
+      if (!d.城市adcode) return;
+
+      const districtsRes = await api.get(`/districts?adcode=${d.城市adcode}`);
+      if (districtsRes.data?.status !== '1') return;
+      const items = districtsRes.data.districts || [];
+      // 直筒子市：没有区县，接口直接返回镇街道
+      if (isDirectControlledCity(items)) {
+        setAddressOptions(prev => ({ ...prev, cities, districts: [], towns: items }));
+        return;
+      }
+      setAddressOptions(prev => ({ ...prev, cities, districts: items, towns: [] }));
+      if (!d.区县adcode) return;
+
+      const townsRes = await api.get(`/districts?adcode=${d.区县adcode}`);
+      if (townsRes.data?.status === '1') {
+        setAddressOptions(prev => ({ ...prev, cities, districts: items, towns: townsRes.data.districts || [] }));
+      }
+    } catch (err) {
+      console.error('恢复草稿地址失败', err);
+    }
+  };
+
+  // 页面加载时尝试恢复上次未提交的登记内容
+  const tryRestoreDraft = async () => {
+    try {
+      const draft = readDraft(MAINT_DRAFT_KEY);
+      if (!draft) return;
+
+      const data = { ...emptyMaintenanceForm(user?.name || ''), ...draft.formData };
+      if (!String(data.维修单号 || '').trim()) data.维修单号 = generateMaintenanceNo();
+      if (!draftHasContent(data)) {
+        clearDraft(MAINT_DRAFT_KEY);
+        return;
+      }
+
+      setFormData(data);
+      if (draft.smartPasteText) setSmartPasteText(draft.smartPasteText);
+      setDraftMeta({ savedAt: draft.savedAt });
+      setHasDraft(true);
+      // 只有刷新前表单是开着的才自动展开；用户自己关掉的，只在页面上留个入口
+      if (draft.modalOpen) setShowForm(true);
+
+      await restoreProductOptions(data);
+      await restoreAddressOptions(data);
+    } catch (err) {
+      console.error('恢复维修登记草稿失败', err);
+    } finally {
+      setDraftReady(true);
+    }
+  };
+
+  const clearMaintenanceDraft = () => {
+    clearDraft(MAINT_DRAFT_KEY);
+    setHasDraft(false);
+    setDraftMeta(null);
+  };
+
+  const handleResumeDraft = () => {
+    setShowForm(true);
+  };
+
+  const handleDiscardDraft = () => {
+    if (!window.confirm('确定放弃未提交的维修登记内容吗？放弃后不可恢复。')) return;
+    clearMaintenanceDraft();
+    setFormData(emptyMaintenanceForm(user?.name || ''));
+    setOptions(prev => ({ ...prev, models: [], types: [], colors: [], specs: [] }));
+    setAddressOptions(prev => ({ ...prev, cities: [], districts: [], towns: [] }));
+    setErrors({});
+    setCourierError('');
+    setSmartPasteText('');
+    setShowForm(false);
   };
 
   const handleFormChange = (field, value) => {
@@ -997,7 +1159,15 @@ function MaintenanceRegistration({ isMobile = false }) {
     setErrors({});
     setCourierError('');
     setSmartPasteText('');
+    setDraftMeta(null);
     setShowForm(true);
+  };
+
+  const handleAddClick = () => {
+    if (showForm) { setShowForm(false); return; }
+    // 有未提交的草稿时，新增登记会把草稿覆盖掉，先确认一下
+    if (hasDraft && !window.confirm('还有未提交的登记内容，新增登记会覆盖它，确定吗？')) return;
+    openAddForm();
   };
 
   const handleSubmit = async (e) => {
@@ -1060,6 +1230,7 @@ function MaintenanceRegistration({ isMobile = false }) {
       setSuccessRecord({ ...formData, barcodePhotoCount });
       setShowSuccessModal(true);
       setShowForm(false);
+      clearMaintenanceDraft();
       setSelectedFiles([]);
       setFilePreviews([]);
       setBarcodeFiles([]);
@@ -1084,6 +1255,7 @@ function MaintenanceRegistration({ isMobile = false }) {
       }
       alert(`预登记已保存（维修单号 ${maintenanceId}），可在列表中继续完善后提交登记`);
       setShowForm(false);
+      clearMaintenanceDraft();
       setSelectedFiles([]);
       setFilePreviews([]);
       setBarcodeFiles([]);
@@ -1943,20 +2115,28 @@ function MaintenanceRegistration({ isMobile = false }) {
       <div style={{ padding: isMobile ? '8px' : '16px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: isMobile ? '12px' : '16px' }}>
         <h3 style={{ margin: 0, fontSize: isMobile ? '16px' : '18px', fontWeight: '600' }}>维修登记</h3>
-        <button
-          onClick={() => { if (!showForm) { openAddForm(); } else { setShowForm(false); } }}
-          style={{
-            padding: '6px 14px',
-            background: '#1976d2',
-            color: '#fff',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            fontSize: '13px'
-          }}
-        >
-          {showForm ? '关闭表单' : '新增登记'}
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          {hasDraft && !showForm && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px', background: '#fff8e1', border: '1px solid #ffb300', borderRadius: '4px', padding: '3px 6px' }}>
+              <span onClick={handleResumeDraft} style={{ fontSize: '12px', color: '#e65100', cursor: 'pointer', whiteSpace: 'nowrap' }}>继续填写草稿</span>
+              <span onClick={handleDiscardDraft} title="放弃草稿" style={{ fontSize: '14px', color: '#999', cursor: 'pointer', lineHeight: 1 }}>×</span>
+            </div>
+          )}
+          <button
+            onClick={handleAddClick}
+            style={{
+              padding: '6px 14px',
+              background: '#1976d2',
+              color: '#fff',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontSize: '13px'
+            }}
+          >
+            {showForm ? '关闭表单' : '新增登记'}
+          </button>
+        </div>
       </div>
 
       <div style={{ background: '#fff', padding: '12px', borderRadius: '8px', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '12px' }}>
@@ -1985,6 +2165,11 @@ function MaintenanceRegistration({ isMobile = false }) {
 
       {showForm && (
         <form onSubmit={handleSubmit} style={{ background: '#fff', padding: '16px', borderRadius: '8px', marginBottom: '16px' }}>
+          {draftMeta && (
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', padding: '8px 12px', marginBottom: '12px', background: '#e8f5e9', border: '1px solid #81c784', borderRadius: '6px', fontSize: '13px', color: '#2e7d32', lineHeight: '1.5' }}>
+              <span>✅ 已恢复上次未提交的内容（{fmtDraftStamp(draftMeta.savedAt)}）。附件图片不保存，需要重新上传；核对无误后直接提交即可，提交后草稿自动清除。</span>
+            </div>
+          )}
           {/* 智能粘贴识别 */}
           <div style={{ marginBottom: '12px', padding: '10px', background: '#f1f8e9', borderRadius: '6px', border: '1px solid #c8e6c9' }}>
             <label style={{ display: 'block', marginBottom: '6px', fontWeight: 'bold', fontSize: '12px', color: '#2e7d32' }}>📋 智能粘贴识别</label>

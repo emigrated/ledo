@@ -8,6 +8,39 @@ import { formatOrderNo, getValidationError } from '../utils/validation';
 import { fmtTime, fmtDate, toChinaDate } from '../utils/time';
 import { copyToClipboard } from '../utils/clipboard';
 import { applyTableLabels } from '../utils/responsiveTable';
+import { saveDraft, readDraft, clearDraft, fmtDraftStamp } from '../utils/draft';
+
+// 退货登记草稿：手机切到别的 APP 时后台页面可能被系统回收，切回来会整页重载、
+// React 状态全丢。这里把已填内容落盘，回来自动恢复。附件图片无法存草稿，需重新上传。
+const RETURN_DRAFT_KEY = 'returnRegistrationDraft';
+
+const emptyReturnForm = (userName = '') => ({
+  订单编号: '',
+  客户信息: '',
+  购买日期: '',
+  品牌: '',
+  型号: '',
+  类型: '',
+  颜色: '',
+  规格: '',
+  原因: '',
+  状态: '',
+  快递: '',
+  单号: '',
+  备注: '',
+  价格: '',
+  仓库: '',
+  平台: '',
+  运费: '',
+  登记人: userName,
+  购买件数: '',
+  退货件数: ''
+});
+
+// 登记人每次都有值，判断"是否真的填过东西"时要排除
+const draftHasContent = (data) => Object.entries(data || {}).some(
+  ([key, value]) => key !== '登记人' && String(value ?? '').trim() !== ''
+);
 
 function ReturnRegistration({ userRole, isMobile = false }) {
   const { user } = useAuth();
@@ -17,6 +50,10 @@ function ReturnRegistration({ userRole, isMobile = false }) {
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [showForm, setShowForm] = useState(false);
+  // 草稿：draftMeta 有值说明当前表单内容是从草稿恢复的，用于顶部提示
+  const [draftMeta, setDraftMeta] = useState(null);
+  const [hasDraft, setHasDraft] = useState(false);
+  const [draftReady, setDraftReady] = useState(false);
   const [expandedRows, setExpandedRows] = useState({});
   const [options, setOptions] = useState({
     brands: [],
@@ -91,28 +128,7 @@ function ReturnRegistration({ userRole, isMobile = false }) {
   const [showShareModal, setShowShareModal] = useState(false);
   const [shareModalData, setShareModalData] = useState(null);
   const [shareModalUrl, setShareModalUrl] = useState('');
-  const [formData, setFormData] = useState({
-    订单编号: '',
-    客户信息: '',
-    购买日期: '',
-    品牌: '',
-    型号: '',
-    类型: '',
-    颜色: '',
-    规格: '',
-    原因: '',
-    状态: '',
-    快递: '',
-    单号: '',
-    备注: '',
-    价格: '',
-    仓库: '',
-    平台: '',
-    运费: '',
-    登记人: user?.name || '',
-    购买件数: '',
-    退货件数: ''
-  });
+  const [formData, setFormData] = useState(() => emptyReturnForm(user?.name || ''));
   const [searchPlatform, setSearchPlatform] = useState('');
   const [searchOrderNo, setSearchOrderNo] = useState('');
   const [searchOrderOptions, setSearchOrderOptions] = useState([]);
@@ -128,10 +144,37 @@ function ReturnRegistration({ userRole, isMobile = false }) {
 
   useEffect(() => {
     fetchRecords();
-    fetchOptions();
+    let cancelled = false;
+    // 顺序很重要：先取回基础选项，再恢复草稿里的级联下拉，
+    // 否则 fetchOptions 的 setOptions 会把恢复出来的选项覆盖成空。
+    (async () => {
+      try {
+        await fetchOptions();
+      } catch (error) {
+        console.error('加载选项失败:', error);
+      }
+      if (!cancelled) await tryRestoreDraft();
+    })();
     fetchPendingSettlementRequests();
     fetchRejectedSettlementIds();
+    return () => { cancelled = true; };
   }, []);
+
+  // 草稿自动保存：输入变化 400ms 后落盘（同时记录表单是否开着）
+  useEffect(() => {
+    if (!draftReady) return;
+    const timer = setTimeout(() => {
+      if (!draftHasContent(formData)) {
+        clearDraft(RETURN_DRAFT_KEY);
+        setHasDraft(false);
+        return;
+      }
+      if (saveDraft(RETURN_DRAFT_KEY, { formData, unitPrice, modalOpen: showForm })) {
+        setHasDraft(true);
+      }
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [formData, unitPrice, showForm, draftReady]);
 
   useEffect(() => {
     if (isMobile) {
@@ -322,6 +365,79 @@ function ReturnRegistration({ userRole, isMobile = false }) {
     } catch (error) {
       console.error('Failed to fetch cascade options:', error);
     }
+  };
+
+  // 恢复草稿里的级联下拉（品牌→型号→类型→颜色→规格）：只恢复表单值是不够的，
+  // 下拉列表刷新后是空的，用户一改选项后面的值就没了。价格不重算，草稿里已经存了。
+  const restoreProductOptions = async (d) => {
+    try {
+      if (!d.品牌) return;
+      const modelsRes = await api.get(`/product-data/models?brand=${encodeURIComponent(d.品牌)}`);
+      setOptions(prev => ({ ...prev, models: modelsRes.data?.models || [] }));
+      if (!d.型号) return;
+
+      const typesRes = await api.get(`/product-data/types?brand=${encodeURIComponent(d.品牌)}&model=${encodeURIComponent(d.型号)}`);
+      setOptions(prev => ({ ...prev, types: typesRes.data?.types || [] }));
+      if (!d.类型) return;
+
+      const colorsRes = await api.get(`/product-data/colors?brand=${encodeURIComponent(d.品牌)}&model=${encodeURIComponent(d.型号)}&type=${encodeURIComponent(d.类型)}`);
+      setOptions(prev => ({ ...prev, colors: colorsRes.data?.colors || [] }));
+      if (!d.颜色) return;
+
+      const specsRes = await api.get(`/product-data/specs?brand=${encodeURIComponent(d.品牌)}&model=${encodeURIComponent(d.型号)}&type=${encodeURIComponent(d.类型)}&color=${encodeURIComponent(d.颜色)}`);
+      setOptions(prev => ({ ...prev, specs: specsRes.data?.specs || [] }));
+    } catch (error) {
+      console.error('恢复草稿产品选项失败:', error);
+    }
+  };
+
+  // 页面加载时尝试恢复上次未提交的登记内容
+  const tryRestoreDraft = async () => {
+    try {
+      const draft = readDraft(RETURN_DRAFT_KEY);
+      if (!draft) return;
+
+      const data = { ...emptyReturnForm(user?.name || ''), ...draft.formData };
+      if (!draftHasContent(data)) {
+        clearDraft(RETURN_DRAFT_KEY);
+        return;
+      }
+
+      setFormData(data);
+      setUnitPrice(Number(draft.unitPrice) || 0);
+      setDraftMeta({ savedAt: draft.savedAt });
+      setHasDraft(true);
+      // 只有刷新前表单是开着的才自动展开；用户自己关掉的，只在页面上留个入口
+      if (draft.modalOpen) setShowForm(true);
+
+      await restoreProductOptions(data);
+    } catch (error) {
+      console.error('恢复退货登记草稿失败:', error);
+    } finally {
+      setDraftReady(true);
+    }
+  };
+
+  const clearReturnDraft = () => {
+    clearDraft(RETURN_DRAFT_KEY);
+    setHasDraft(false);
+    setDraftMeta(null);
+  };
+
+  const handleResumeDraft = () => {
+    setShowForm(true);
+  };
+
+  const handleDiscardDraft = () => {
+    if (!window.confirm('确定放弃未提交的退货登记内容吗？放弃后不可恢复。')) return;
+    clearReturnDraft();
+    setFormData(emptyReturnForm(user?.name || ''));
+    setUnitPrice(0);
+    setOptions(prev => ({ ...prev, models: [], types: [], colors: [], specs: [] }));
+    setErrors({});
+    setDuplicateError('');
+    setCourierError('');
+    setShowForm(false);
   };
 
   const handleFormChange = (field, value) => {
@@ -641,30 +757,10 @@ function ReturnRegistration({ userRole, isMobile = false }) {
       copyToClipboardWithAlert(getCopyText(formData), false);
       alert('登记成功,已复制记录到剪贴板！');
       setShowForm(false);
+      clearReturnDraft();
       setSelectedFiles([]);
       setFilePreviews([]);
-      setFormData({
-        订单编号: '',
-        客户信息: '',
-        购买日期: '',
-        品牌: '',
-        型号: '',
-        类型: '',
-        颜色: '',
-        规格: '',
-        原因: '',
-        状态: '',
-        快递: '',
-        单号: '',
-        备注: '',
-        价格: '',
-        仓库: '',
-        平台: '',
-        运费: '',
-        登记人: user?.name || '',
-        购买件数: '',
-        退货件数: ''
-      });
+      setFormData(emptyReturnForm(user?.name || ''));
       setErrors({});
       setDuplicateError('');
       setCourierError('');
@@ -1283,20 +1379,28 @@ function ReturnRegistration({ userRole, isMobile = false }) {
       <div style={{ padding: isMobile ? '8px' : '16px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: isMobile ? '12px' : '16px' }}>
         <h3 style={{ margin: 0, fontSize: isMobile ? '16px' : '18px', fontWeight: '600' }}>退货登记</h3>
-        <button
-          onClick={() => setShowForm(!showForm)}
-          style={{
-            padding: '6px 14px',
-            background: '#1976d2',
-            color: '#fff',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            fontSize: '13px'
-          }}
-        >
-          {showForm ? '关闭表单' : '新增登记'}
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          {hasDraft && !showForm && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px', background: '#fff8e1', border: '1px solid #ffb300', borderRadius: '4px', padding: '3px 6px' }}>
+              <span onClick={handleResumeDraft} style={{ fontSize: '12px', color: '#e65100', cursor: 'pointer', whiteSpace: 'nowrap' }}>继续填写草稿</span>
+              <span onClick={handleDiscardDraft} title="放弃草稿" style={{ fontSize: '14px', color: '#999', cursor: 'pointer', lineHeight: 1 }}>×</span>
+            </div>
+          )}
+          <button
+            onClick={() => setShowForm(!showForm)}
+            style={{
+              padding: '6px 14px',
+              background: '#1976d2',
+              color: '#fff',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontSize: '13px'
+            }}
+          >
+            {showForm ? '关闭表单' : '新增登记'}
+          </button>
+        </div>
       </div>
 
       <div style={{ background: '#fff', padding: isMobile ? '10px' : '12px', borderRadius: '8px', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
@@ -1382,6 +1486,11 @@ function ReturnRegistration({ userRole, isMobile = false }) {
       <div>
         {showForm && (
           <form onSubmit={handleSubmit} style={{ background: '#fff', padding: '16px', borderRadius: '8px', marginBottom: '16px' }}>
+            {draftMeta && (
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', padding: '8px 12px', marginBottom: '12px', background: '#e8f5e9', border: '1px solid #81c784', borderRadius: '6px', fontSize: '13px', color: '#2e7d32', lineHeight: '1.5' }}>
+                <span>✅ 已恢复上次未提交的内容（{fmtDraftStamp(draftMeta.savedAt)}）。附件图片不保存，需要重新上传；核对无误后直接提交即可，提交后草稿自动清除。</span>
+              </div>
+            )}
             <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: '12px' }}>
             <div>
               <label style={labelStyle('平台')}>平台 *</label>
