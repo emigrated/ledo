@@ -40,6 +40,7 @@ function MaintenanceRegistration({ isMobile = false }) {
   const [editBarcodeFiles, setEditBarcodeFiles] = useState([]);
   const [editBarcodeFilePreviews, setEditBarcodeFilePreviews] = useState([]);
   const [changeHistory, setChangeHistory] = useState({});
+  const [expandedChangeHistory, setExpandedChangeHistory] = useState({});
   const [attachments, setAttachments] = useState({});
   const [paymentProof, setPaymentProof] = useState({});
   const [showPaymentModal, setShowPaymentModal] = useState(false);
@@ -1320,6 +1321,85 @@ function MaintenanceRegistration({ isMobile = false }) {
     };
   };
 
+
+  // 修改记录（维修模块）：展示谁在什么时候把哪个字段从什么改成了什么
+  const renderChangeHistory = (rec, isMobileView) => {
+    const rawList = changeHistory[rec.维修单号];
+    if (!Array.isArray(rawList) || rawList.length === 0) return null;
+
+    const sorted = [...rawList].sort((a, b) => new Date(b.requested_at || 0) - new Date(a.requested_at || 0));
+    const isExpanded = !!expandedChangeHistory[rec.维修单号];
+    const visible = isExpanded ? sorted : sorted.slice(0, 1);
+    const statusStyle = {
+      approved: { color: '#4caf50', text: '已通过' },
+      rejected: { color: '#f44336', text: '已拒绝' },
+      pending: { color: '#ff9800', text: '待审核' }
+    };
+    const fmtVal = (v) => (v === undefined || v === null || v === '') ? '(空)' : String(v);
+
+    return (
+      <div style={{ marginTop: '10px', paddingTop: '10px', borderTop: '1px dashed #ddd' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
+          <span style={{ fontWeight: 'bold', color: '#1976d2', fontSize: '14px' }}>修改记录</span>
+          <span style={{ fontSize: '12px', color: '#1565c0', background: '#e3f2fd', borderRadius: '10px', padding: '1px 8px' }}>{sorted.length} 条</span>
+          {sorted.length > 1 && (
+            <span
+              onClick={() => setExpandedChangeHistory(prev => ({ ...prev, [rec.维修单号]: !prev[rec.维修单号] }))}
+              style={{ cursor: 'pointer', fontSize: '12px', color: '#1976d2', userSelect: 'none' }}
+            >
+              {isExpanded ? '▼ 收起' : `▶ 展开全部 ${sorted.length} 条`}
+            </span>
+          )}
+        </div>
+
+        {visible.map((cr, idx) => {
+          let changes = [];
+          try {
+            const parsed = typeof cr.changed_fields === 'string' ? JSON.parse(cr.changed_fields) : (cr.changed_fields || {});
+            changes = Object.entries(parsed).filter(([k, v]) =>
+              k !== 'requested_by' && v && typeof v === 'object' && ('old' in v || 'new' in v)
+            );
+          } catch (e) {
+            changes = [];
+          }
+          const st = statusStyle[cr.status] || statusStyle.pending;
+          const isDirect = cr.status === 'approved' && (
+            cr.change_reason === '管理员直接修改' ||
+            (cr.requester_role === 'admin' && String(cr.requested_by) === String(cr.processed_by))
+          );
+          const who = cr.requester_name || (cr.requested_by ? `ID:${cr.requested_by}` : '未知');
+
+          return (
+            <div key={cr.id || idx} style={{ padding: '8px 10px', background: '#f9f9f9', borderRadius: '4px', fontSize: '12px', marginBottom: '6px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', marginBottom: changes.length ? '6px' : 0, flexWrap: 'wrap' }}>
+                <span style={{ color: '#666' }}>
+                  {isDirect ? '操作人' : '申请人'}：<strong style={{ color: '#333' }}>{who}</strong>
+                  <span style={{ color: '#999', marginLeft: '6px' }}>{cr.requested_at ? fmtTime(cr.requested_at) : '-'}</span>
+                </span>
+                <span style={{ color: st.color, fontWeight: 'bold', whiteSpace: 'nowrap' }}>
+                  {isDirect ? '已通过（管理员直接修改）' : st.text}
+                </span>
+              </div>
+              {changes.length > 0 ? changes.map(([key, val]) => (
+                <div key={key} style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px', padding: '4px 8px', background: '#fff3cd', borderRadius: '3px', flexWrap: 'wrap' }}>
+                  <span style={{ fontWeight: 'bold', minWidth: isMobileView ? 'auto' : '70px' }}>{key}:</span>
+                  <span style={{ color: '#888', textDecoration: 'line-through', fontSize: '11px', maxWidth: '100%', wordBreak: 'break-all' }}>{fmtVal(val.old)}</span>
+                  <span style={{ color: '#d32f2f', fontWeight: 'bold' }}>→</span>
+                  <span style={{ color: '#2e7d32', fontWeight: 'bold', maxWidth: '100%', wordBreak: 'break-all' }}>{fmtVal(val.new)}</span>
+                </div>
+              )) : (
+                <span style={{ color: '#999' }}>{cr.change_reason || '无字段变更（仅上传附件）'}</span>
+              )}
+            </div>
+          );
+        })}
+        {!isExpanded && sorted.length > 1 && (
+          <div style={{ fontSize: '11px', color: '#999' }}>仅显示最近一条</div>
+        )}
+      </div>
+    );
+  };
+
   // 展开详细内容（桌面端和移动端共用）
   const renderDetailContent = (rec, isMobileView) => {
     const flexDir = isMobileView ? 'column' : 'row';
@@ -1801,6 +1881,8 @@ function MaintenanceRegistration({ isMobile = false }) {
       setEditFilePreviews([]);
       setEditBarcodeFiles([]);
       setEditBarcodeFilePreviews([]);
+      // 重新拉取该单的修改记录，否则展开区看到的还是改动前的旧数据
+      fetchChangeHistory(editingRecord.维修单号);
       setPage(1);
       fetchRecords(1);
     } catch (error) {
@@ -2533,6 +2615,13 @@ function MaintenanceRegistration({ isMobile = false }) {
                             </td>
                           </tr>
                           )}
+                          {changeHistory[rec.维修单号] && changeHistory[rec.维修单号].length > 0 && (
+                          <tr>
+                            <td style={{ padding: '0 8px 8px', border: '1px solid #ddd' }} colSpan={6}>
+                              {renderChangeHistory(rec, false)}
+                            </td>
+                          </tr>
+                          )}
                           <tr>
                             <td style={{ padding: '4px 8px', border: '1px solid #ddd', background: '#f9f9f9', textAlign: 'center' }} colSpan={6}>
                               <div style={{ display: 'flex', gap: '8px', justifyContent: 'center' }}>
@@ -2665,6 +2754,7 @@ function MaintenanceRegistration({ isMobile = false }) {
               {expandedRows[rec.维修单号] && (
                 <div style={{ padding: '0 12px 12px', borderTop: '1px solid #eee', fontSize: '13px', lineHeight: '1.6' }}>
                   {renderDetailContent(rec, true)}
+                  {renderChangeHistory(rec, true)}
                 </div>
               )}
             </div>

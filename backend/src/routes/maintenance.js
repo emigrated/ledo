@@ -654,7 +654,20 @@ router.get('/change-requests/pending', async (req, res) => {
 // Get change requests for a maintenance record
 router.get('/:id/change-requests', async (req, res) => {
   const maintenanceId = req.params.id;
-  const sql = 'SELECT * FROM maintenance_change_requests WHERE maintenance_id = ? ORDER BY requested_at DESC';
+  // requested_by / processed_by 存的是 id（普通用户在 users 表、管理员在 admins 表），
+  // 这里同时 LEFT JOIN 两张表取出姓名，前端直接展示，避免只显示一串数字。
+  const sql = `
+    SELECT mcr.*,
+           COALESCE(u.name, a.name) AS requester_name,
+           COALESCE(u.role, 'admin') AS requester_role,
+           pa.name AS processor_name
+    FROM maintenance_change_requests mcr
+    LEFT JOIN users u  ON u.id  = mcr.requested_by
+    LEFT JOIN admins a ON a.id  = mcr.requested_by
+    LEFT JOIN admins pa ON pa.id = mcr.processed_by
+    WHERE mcr.maintenance_id = ?
+    ORDER BY mcr.requested_at DESC
+  `;
   try {
     const [rows] = await pool.query(sql, [maintenanceId]);
     res.json(rows);
@@ -678,7 +691,11 @@ router.post('/:id/change-request', async (req, res) => {
   try {
     await pool.query('SET NAMES utf8mb4');
     
-    const userId = req.headers['x-user-id'] || req.body.requested_by || null;
+    // 优先用 JWT 里的登录身份（可信），其次才是请求头/请求体（兼容旧调用）
+    const userId = (req.user && req.user.userId)
+      || req.headers['x-user-id']
+      || req.body.requested_by
+      || null;
     
     // ===== 管理员：直接生效，不入审核队列，但仍写一条已通过的修改记录 =====
     const isAdmin = !!(req.user && req.user.role === 'admin');
